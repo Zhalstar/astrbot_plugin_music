@@ -37,6 +37,7 @@ class QQMusicLogin:
         self.config = config
         self._task: asyncio.Task | None = None
         self._session: aiohttp.ClientSession | None = None
+        self._keepalive_task: asyncio.Task | None = None
         self._start_lock = asyncio.Lock()
 
     @staticmethod
@@ -336,6 +337,7 @@ class QQMusicLogin:
                 qqmusic_config.cookies = cookie_string
                 qqmusic_config.uin = uin
                 self.config.save_config()
+                self.start_keepalive()
                 await event.send(
                     event.plain_result(f"QQ 音乐登录成功，Cookie已写入配置。QQ：{uin}")
                 )
@@ -353,8 +355,101 @@ class QQMusicLogin:
                 self._task = None
                 self._session = None
 
+    def start_keepalive(self) -> None:
+        """Start the background keepalive loop if cookies are present."""
+        if self._keepalive_task and not self._keepalive_task.done():
+            return
+        qqmusic_cfg = getattr(self.config.players, "qqmusic", None)
+        if not qqmusic_cfg or not qqmusic_cfg.cookies:
+            return
+        self._keepalive_task = asyncio.create_task(self._keepalive_loop())
+
+    async def _keepalive_loop(self) -> None:
+        """Periodically ping QQ Music API to maintain cookie freshness."""
+        logger.debug("[music] QQ Music keepalive loop started")
+        # 初始等待 1 小时后开始首次探测
+        await asyncio.sleep(3600)
+        while True:
+            try:
+                await self.ping_and_refresh()
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.warning(f"[music] QQ Music keepalive check failed: {exc}")
+            # 默认每 8 小时探测保活一次
+            await asyncio.sleep(8 * 3600)
+
+    async def ping_and_refresh(self) -> bool:
+        """Check QQ Music cookie validity and persist updated cookies if returned."""
+        qqmusic_cfg = getattr(self.config.players, "qqmusic", None)
+        if not qqmusic_cfg or not qqmusic_cfg.cookies:
+            return False
+
+        uin = qqmusic_cfg.uin or "0"
+        payload = {
+            "comm": {
+                "ct": 24,
+                "cv": 0,
+                "format": "json",
+                "uin": int(uin) if uin.isdigit() else 0,
+            },
+            "req_0": {
+                "module": "music.musicpay.MusicPayInfoServer",
+                "method": "GetMusicPayInfo",
+                "param": {"uin": uin},
+            },
+        }
+
+        headers = {
+            "User-Agent": self._USER_AGENT,
+            "Referer": "https://y.qq.com/",
+            "Origin": "https://y.qq.com",
+            "Cookie": qqmusic_cfg.cookies,
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                self._MUSIC_LOGIN_URL,
+                json=payload,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as response:
+                if response.status >= 400:
+                    logger.warning(f"[music] QQ Music keepalive ping HTTP {response.status}")
+                    return False
+                body = await response.json(content_type=None)
+                
+                # 检查返回结果并同步最新 cookie
+                set_cookies = session.cookie_jar.filter_cookies(URL(self._MUSIC_LOGIN_URL))
+                if set_cookies:
+                    existing = {}
+                    for item in qqmusic_cfg.cookies.split(";"):
+                        k, sep, v = item.strip().partition("=")
+                        if sep and k:
+                            existing[k] = v
+                    updated = False
+                    for k, morsel in set_cookies.items():
+                        if morsel.value and existing.get(k) != morsel.value:
+                            existing[k] = morsel.value
+                            updated = True
+                    if updated:
+                        qqmusic_cfg.cookies = "; ".join(f"{k}={v}" for k, v in existing.items())
+                        self.config.save_config()
+                        logger.info("[music] QQ Music cookies refreshed and updated")
+
+        code = (body.get("req_0") or {}).get("code", 0)
+        if code != 0:
+            logger.warning(f"[music] QQ Music keepalive ping returned code {code}, cookie may be expired")
+            return False
+        logger.debug("[music] QQ Music keepalive check successful")
+        return True
+
     async def close(self) -> None:
         """Cancel the active login task and release its HTTP session."""
+        if self._keepalive_task and not self._keepalive_task.done():
+            self._keepalive_task.cancel()
+            await asyncio.gather(self._keepalive_task, return_exceptions=True)
+        self._keepalive_task = None
         task = self._task
         if task and not task.done():
             task.cancel()

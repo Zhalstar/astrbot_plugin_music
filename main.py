@@ -41,6 +41,7 @@ class MusicPlugin(Star):
 
     async def initialize(self):
         self._register_player()
+        self.qqmusic_login.start_keepalive()
 
     @filter.on_platform_loaded()
     async def _on_platform_loaded(self) -> None:
