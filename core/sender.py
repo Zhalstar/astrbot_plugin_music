@@ -492,8 +492,7 @@ class MusicSender:
             await self.send_msg(event, payloads)
             return True
         except Exception as e:
-            logger.error(e)
-            await event.send(event.plain_result(str(e)))
+            logger.warning(f"Native music card send failed: {e}")
             return False
 
     async def _send_ark_card(
@@ -660,7 +659,7 @@ class MusicSender:
 
     def _get_sender(self, mode: str):
         return {
-            "card": self._send_card,
+            "native_card": self._send_card,
             "ark_card": self._send_ark_card,
             "record_link": self._send_record_link,
             "record_local": self._send_record_local,
@@ -674,7 +673,7 @@ class MusicSender:
         match mode:
             case "text":
                 return True
-            case "card":
+            case "native_card":
                 return platform == "aiocqhttp"
             case "ark_card":
                 return platform == "aiocqhttp"
@@ -693,7 +692,7 @@ class MusicSender:
         modes: list[str] | None = None,
     ) -> tuple[bool, bool]:
         target_modes = modes if modes is not None else self.cfg.real_send_modes
-        needs_audio = any(m not in ("card", "text") for m in target_modes)
+        needs_audio = any(m not in ("native_card", "ark_card", "text") for m in target_modes)
 
         if not song.audio_url or not song.cover_url:
             song = await player.fetch_extra(song)
@@ -702,7 +701,7 @@ class MusicSender:
             needs_audio
             and not song.audio_url
             and target_modes
-            and target_modes[0] != "card"
+            and target_modes[0] != "native_card"
         ):
             await event.send(event.plain_result(f"【{song.name}】音频获取失败"))
             return False, False
@@ -716,7 +715,7 @@ class MusicSender:
         target_modes = modes if modes is not None else self.cfg.real_send_modes
 
         for mode in target_modes:
-            if mode == "card" and not song.card_type:
+            if mode == "native_card" and not song.card_type:
                 logger.debug(
                     f"{player.platform.name} does not support card sending; skipping"
                 )

@@ -207,6 +207,9 @@ class PluginConfig(ConfigNode):
         self.font_path = self.plugin_dir / "fonts" / "simhei.ttf"
         self.temp_dir = Path(get_astrbot_temp_path())
 
+        if self._migrate_legacy_send_modes():
+            self.save_config()
+
         self._select_modes = [
             m.split("(", 1)[0].strip() for m in self.search_config.select_modes
         ]
@@ -236,6 +239,25 @@ class PluginConfig(ConfigNode):
             self.save_config()
 
         self._players = MusicPlayerConfig(self.players_template)
+
+    def _migrate_legacy_send_modes(self) -> bool:
+        """Migrate legacy 'card' send mode to 'native_card'."""
+        raw_modes = self.send_config.send_modes
+        if not raw_modes:
+            return False
+        changed = False
+        new_modes = []
+        for mode in raw_modes:
+            prefix = mode.split("(", 1)[0].strip()
+            if prefix == "card":
+                new_modes.append("native_card(原生卡片)")
+                changed = True
+            else:
+                new_modes.append(mode)
+        if changed:
+            self.send_config.send_modes = new_modes
+            logger.info("[music] Migrated legacy 'card' send mode to 'native_card'")
+        return changed
 
     def _normalize_player_priorities(self) -> bool:
         """Make player priorities unique and sort the configured players.
