@@ -27,6 +27,8 @@ class BaseMusicPlayer(ABC):
 
     platform: ClassVar[Platform]
     """ 平台信息（包含名称和显示名称） """
+    supported_audio_qualities: ClassVar[tuple[str, ...]] = ("standard",)
+    """Audio quality identifiers supported by this platform."""
     platform_cfg: MusicPlayerItem
 
     HEADERS = {
@@ -160,15 +162,23 @@ class BaseMusicPlayer(ABC):
             logger.warning(f"封面下载失败: {e}")
             return None
 
-    async def download_audio(self, url: str) -> Path | None:
-        """Download audio to the shared temp directory.
+    async def download_audio(
+        self, song: Song, quality: str | None = None
+    ) -> Path | None:
+        """Download a song's audio to the shared temp directory.
 
         Args:
-            url: Audio URL.
+            song: Song whose resolved audio URL should be downloaded.
+            quality: Requested audio quality, when supported by the platform.
 
         Returns:
             Path to the downloaded file, or None if the download fails.
         """
+        del quality
+        if not song.audio_url:
+            return None
+
+        url = song.audio_url
         self.cfg.temp_dir.mkdir(parents=True, exist_ok=True)
         suffix = Path(urlparse(url).path).suffix.lower()
         if suffix not in {
@@ -199,21 +209,6 @@ class BaseMusicPlayer(ABC):
             file_path.unlink(missing_ok=True)
             logger.error(f"歌曲下载失败，错误信息：{e}")
             return None
-
-    async def download_audio_for_file(self, song: Song) -> Path | None:
-        """Download audio for file-mode sending.
-
-        Args:
-            song: Song whose resolved audio URL should be downloaded.
-
-        Returns:
-            Path to the downloaded file, or None if the song has no URL or
-            downloading fails.
-        """
-        if not song.audio_url:
-            return None
-        return await self.download_audio(song.audio_url)
-
 
     async def close(self):
         """Close the default HTTP session if it was created."""

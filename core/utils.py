@@ -1,7 +1,4 @@
-import re
 from enum import IntEnum
-
-from .model import Song
 
 
 class SendMode(IntEnum):
@@ -40,60 +37,6 @@ MODE_MAP_CN: dict[str, SendMode] = {
     "文本": SendMode.TEXT,
     "text": SendMode.TEXT,
 }
-
-
-def pick_best_song(
-    query: str, songs: list[Song], artist: str | None = None
-) -> Song | None:
-    """Select the best candidate only when its title and requested artist match.
-
-    Args:
-        query: User-provided song title, optionally followed by an artist.
-        songs: Search results to rank.
-        artist: Artist that must match when supplied separately.
-
-    Returns:
-        The best matching song, or None when no candidate confidently matches.
-    """
-    if not songs:
-        return None
-
-    def normalize(value: str) -> str:
-        return re.sub(r"[\W_]+", "", value.casefold())
-
-    normalized_query = normalize(query)
-    expected_artist = normalize(artist or "")
-    if not normalized_query:
-        return songs[0] if not expected_artist else None
-
-    matches: list[tuple[int, Song]] = []
-    for song in songs:
-        title = normalize(song.name or "")
-        singer = normalize(song.artists or "")
-        if not title:
-            continue
-
-        if title in normalized_query:
-            extra_query = normalized_query.replace(title, "", 1)
-        elif normalized_query in title:
-            extra_query = ""
-        else:
-            continue
-
-        if expected_artist and expected_artist not in singer:
-            continue
-        if extra_query and not expected_artist:
-            if extra_query not in singer and extra_query not in title:
-                continue
-
-        score = len(title) * 2
-        if title == normalized_query:
-            score += 100
-        if expected_artist:
-            score += 100
-        matches.append((score, song))
-
-    return max(matches, key=lambda match: match[0])[1] if matches else None
 
 
 def parse_user_input(arg: str) -> tuple[int, list[str] | None, str | None]:

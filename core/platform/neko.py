@@ -353,23 +353,29 @@ class NekoMusic(BaseMusicPlayer):
             logger.warning(f"Neko Music cover download failed: {exc}")
             return None
 
-    async def download_audio(self, url: str) -> Path | None:
+    async def download_audio(
+        self, song: Song, quality: str | None = None
+    ) -> Path | None:
         """Download Neko media with required client headers.
 
         Args:
-            url: Direct media URL resolved by the Neko API.
+            song: Song whose direct media URL was resolved by the Neko API.
+            quality: Requested audio quality, ignored by this platform.
 
         Returns:
             Path to the downloaded audio, or None if the request fails.
         """
-        suffix = Path(urlparse(url).path).suffix.lower()
+        del quality
+        if not song.audio_url:
+            return None
+        suffix = Path(urlparse(song.audio_url).path).suffix.lower()
         if suffix not in {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav"}:
             suffix = ".mp3"
         self.cfg.temp_dir.mkdir(parents=True, exist_ok=True)
         file_path = self.cfg.temp_dir / f"{uuid.uuid4().hex}{suffix}"
         try:
             async with self._get_session().get(
-                url,
+                song.audio_url,
                 headers=self._api_headers(),
                 proxy=self.platform_cfg.proxy or None,
                 timeout=120,  # type: ignore

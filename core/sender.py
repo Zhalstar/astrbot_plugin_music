@@ -40,6 +40,7 @@ from .ark_card import ArkCard
 from .config import PluginConfig
 from .lyrics_renderer import LyricsRenderer
 from .model import Song
+from .music_service import MusicService
 from .platform import BaseMusicPlayer
 from .song_renderer import CardRenderer
 
@@ -51,11 +52,22 @@ class MusicSender:
         context: Context,
         lyrics_renderer: LyricsRenderer,
         song_renderer: CardRenderer,
+        music_service: MusicService,
     ):
+        """Create message presentation using the plugin's shared music service.
+
+        Args:
+            config: Plugin configuration.
+            context: AstrBot context used for platform interactions.
+            lyrics_renderer: Renderer for lyric images.
+            song_renderer: Renderer for candidate menus.
+            music_service: Service owned and managed by the plugin lifecycle.
+        """
         self.cfg = config
         self.context = context
         self.lyrics_renderer = lyrics_renderer
         self.song_renderer = song_renderer
+        self.music_service = music_service
         self.ark_card = ArkCard(config)
         self._selection_message_ids: dict[str, str | int] = {}
         self._selection_contexts: dict[str, dict[str, Any]] = {}
@@ -538,7 +550,7 @@ class MusicSender:
         if not song.audio_url:
             return False
 
-        file_path = await player.download_audio(song.audio_url)
+        file_path = await player.download_audio(song, quality="standard")
         if not file_path:
             logger.error(f"【{song.name}】下载失败")
             return False
@@ -585,11 +597,9 @@ class MusicSender:
         if not song.audio_url:
             return False
 
-        download_for_file = getattr(player, "download_audio_for_file", None)
-        if download_for_file is None:
-            file_path = await player.download_audio(song.audio_url)
-        else:
-            file_path = await download_for_file(song)
+        file_path = await player.download_audio(
+            song, quality=getattr(player.platform_cfg, "quality", None)
+        )
         if not file_path:
             logger.error(f"【{song.name}】下载失败")
             return False
@@ -619,11 +629,18 @@ class MusicSender:
     async def send_comment(
         self, event: AstrMessageEvent, player: BaseMusicPlayer, song: Song
     ) -> bool:
-        """发评论"""
+        """Fetch popular comments through the service and send a random comment.
+
+        Args:
+            event: Message event receiving the comment.
+            player: Source that provided the selected song.
+            song: Song whose popular comment should be sent.
+
+        Returns:
+            Whether a comment was successfully sent.
+        """
+        song = await self.music_service.fetch_comments(player, song)
         if not song.comments:
-            await player.fetch_comments(song)
-        if not song.comments:
-            # 没有评论
             return False
         try:
             content = (
@@ -691,8 +708,10 @@ class MusicSender:
         song: Song,
         modes: list[str] | None = None,
     ) -> tuple[bool, bool]:
-        target_modes = modes if modes is not None else self.cfg.real_send_modes
-        needs_audio = any(m not in ("native_card", "ark_card", "text") for m in target_modes)
+        target_modes = modes or self.cfg.real_send_modes
+        needs_audio = any(
+            m not in ("native_card", "ark_card", "text") for m in target_modes
+        )
 
         if not song.audio_url or not song.cover_url:
             song = await player.fetch_extra(song)

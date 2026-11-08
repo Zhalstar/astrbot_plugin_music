@@ -6,16 +6,13 @@ import hashlib
 import io
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import aiohttp
 import qrcode
 
 from astrbot.api import logger
-from astrbot.api.event import AstrMessageEvent
-from astrbot.api.message_components import Image
-from astrbot.core.message.components import Plain
-from astrbot.core.message.message_event_result import MessageChain
 
 from .config import PluginConfig
 
@@ -102,16 +99,21 @@ class KuGouLogin:
                 raise RuntimeError("KuGou login API returned an invalid response")
             return body
 
-    async def start(self, event: AstrMessageEvent) -> None:
+    async def start(
+        self,
+        on_qr: Callable[[bytes], Awaitable[None]],
+        on_message: Callable[[str], Awaitable[None]],
+    ) -> None:
         """Create a KuGou QR code and start polling for confirmation.
 
         Args:
-            event: The command event.
+            on_qr: Callback receiving the QR image as PNG bytes.
+            on_message: Callback receiving duplicate-session, completion, timeout,
+                or failure messages. It remains active during background polling.
         """
         async with self._start_lock:
             if self._task and not self._task.done():
-                await event.send(event.plain_result("已有酷狗音乐登录会话正在等待扫码"))
-                event.stop_event()
+                await on_message("已有酷狗音乐登录会话正在等待扫码")
                 return
 
             session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20))
@@ -155,28 +157,23 @@ class KuGouLogin:
                 qr = qrcode.make(f"{self._QR_PAGE}{key}")
                 output = io.BytesIO()
                 qr.save(output)
-                await event.send(
-                    MessageChain(
-                        [
-                            Plain("用酷狗扫码登录:"),
-                            Image.fromBytes(output.getvalue()),
-                        ]
-                    )
-                )
+                await on_qr(output.getvalue())
                 self._task = asyncio.create_task(
-                    self._poll_login(event, session, key, configured)
+                    self._poll_login(on_message, session, key, configured)
                 )
+            except asyncio.CancelledError:
+                await session.close()
+                self._session = None
+                raise
             except Exception as exc:
                 await session.close()
                 self._session = None
                 logger.warning(f"[music] Could not start KuGou QR login: {exc}")
-                await event.send(event.plain_result(f"无法开始酷狗音乐登录：{exc}"))
-            finally:
-                event.stop_event()
+                await on_message(f"无法开始酷狗音乐登录：{exc}")
 
     async def _poll_login(
         self,
-        event: AstrMessageEvent,
+        on_message: Callable[[str], Awaitable[None]],
         session: aiohttp.ClientSession,
         key: str,
         configured: dict[str, str],
@@ -210,9 +207,7 @@ class KuGouLogin:
                         logger.info(status_messages[status])
                     last_status = status
                 if status == "0":
-                    await event.send(
-                        event.plain_result("酷狗二维码已过期，请重新发送登录酷狗")
-                    )
+                    await on_message("酷狗二维码已过期，请重新登录")
                     return
                 if status == "4":
                     token = str(data.get("token") or "")
@@ -252,20 +247,16 @@ class KuGouLogin:
                         f"{key_}={value}" for key_, value in configured.items()
                     )
                     self.config.save_config()
-                    await event.send(
-                        event.plain_result(
-                            f"酷狗登录成功，Cookie已写入配置。ID：{userid}"
-                        )
-                    )
+                    await on_message(f"酷狗登录成功，Cookie已写入配置。ID：{userid}")
                     return
                 await asyncio.sleep(2)
-            await event.send(event.plain_result("酷狗登录二维码已超时，请重新登录"))
+            await on_message("酷狗登录二维码已超时，请重新登录")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.warning(f"[music] KuGou QR login failed: {exc}")
             with contextlib.suppress(Exception):
-                await event.send(event.plain_result(f"酷狗音乐登录失败：{exc}"))
+                await on_message(f"酷狗音乐登录失败：{exc}")
         finally:
             await session.close()
             if self._task is current_task:
@@ -274,11 +265,12 @@ class KuGouLogin:
 
     async def close(self) -> None:
         """Cancel the active login task and release its HTTP session."""
-        task = self._task
-        if task and not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-        elif self._session and not self._session.closed:
-            await self._session.close()
-        self._task = None
-        self._session = None
+        async with self._start_lock:
+            task = self._task
+            if task and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            if self._session and not self._session.closed:
+                await self._session.close()
+            self._task = None
+            self._session = None

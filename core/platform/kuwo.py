@@ -37,6 +37,7 @@ class KuwoMusic(BaseMusicPlayer):
         "sur": "20501kmflac",
         "jymaster": "20900kmflac",
     }
+    supported_audio_qualities: ClassVar[tuple[str, ...]] = tuple(QUALITY_TO_BITRATE)
     TRACK_USER_ALPHABET = string.ascii_lowercase + string.digits
     TRACK_USER_LENGTH = 16
     COVER_BASE_URL = "http://img1.kwcdn.kuwo.cn/star/albumcover/"
@@ -234,7 +235,9 @@ class KuwoMusic(BaseMusicPlayer):
                         pass
         return song
 
-    async def download_audio_for_file(self, song: Song) -> Path | None:
+    async def download_audio(
+        self, song: Song, quality: str | None = None
+    ) -> Path | None:
         """Download configured Kuwo quality, falling back to standard audio.
 
         Args:
@@ -244,12 +247,7 @@ class KuwoMusic(BaseMusicPlayer):
             Path to the requested or fallback audio file, or None if both
             downloads fail.
         """
-        configured_quality = getattr(self.platform_cfg, "quality", None)
-        quality = (
-            configured_quality.strip().lower()
-            if isinstance(configured_quality, str)
-            else "lossless"
-        )
+        quality = quality or self.platform_cfg.quality or "lossless"
         bitrate = self.QUALITY_TO_BITRATE.get(quality, self.TRACK_BITRATE)
         if bitrate != self.TRACK_BITRATE and song.id:
             track_params = {
@@ -296,9 +294,13 @@ class KuwoMusic(BaseMusicPlayer):
                     audio_format == "mflac"
                     or Path(clean_high_url).suffix.lower() == ".mflac"
                 )
-                if clean_high_url and (not is_mflac or (isinstance(ekey, str) and ekey)):
+                if clean_high_url and (
+                    not is_mflac or (isinstance(ekey, str) and ekey)
+                ):
                     try:
-                        file_path = await self.download_audio(clean_high_url)
+                        file_path = await super().download_audio(
+                            Song(id=song.id, audio_url=clean_high_url)
+                        )
                     except Exception as exc:
                         logger.warning(
                             f"Kuwo {quality} quality download failed, falling back: {exc}"
@@ -339,7 +341,7 @@ class KuwoMusic(BaseMusicPlayer):
                 )
 
         if song.audio_url:
-            return await self.download_audio(song.audio_url)
+            return await super().download_audio(song, quality="standard")
         return None
 
     async def fetch_lyrics(self, song: Song) -> Song:

@@ -107,18 +107,24 @@ class QQMusic(BaseMusicPlayer):
             logger.warning(f"QQ Music cover download failed: {exc}")
             return None
 
-    async def download_audio(self, url: str) -> Path | None:
+    async def download_audio(
+        self, song: Song, quality: str | None = None
+    ) -> Path | None:
         """Download QQ Music audio with urllib.
 
         Args:
-            url: Audio URL.
+            song: Song whose audio URL should be downloaded.
+            quality: Requested audio quality, ignored by this platform.
 
         Returns:
             Path to the downloaded file, or None if the request fails.
         """
+        del quality
+        if not song.audio_url:
+            return None
         self.cfg.temp_dir.mkdir(parents=True, exist_ok=True)
         file_path = self.cfg.temp_dir / f"{uuid.uuid4().hex}.mp3"
-        request = urllib.request.Request(url, headers=self.DOWNLOAD_HEADERS)
+        request = urllib.request.Request(song.audio_url, headers=self.DOWNLOAD_HEADERS)
         proxy = self.platform_cfg.proxy or None
         proxy_handler = {"http": proxy, "https": proxy} if proxy else {}
         opener = urllib.request.build_opener(urllib.request.ProxyHandler(proxy_handler))

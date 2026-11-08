@@ -6,16 +6,12 @@ import hashlib
 import re
 import time
 import urllib.parse
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 
 import aiohttp
 from yarl import URL
 
 from astrbot.api import logger
-from astrbot.api.event import AstrMessageEvent
-from astrbot.api.message_components import Image
-from astrbot.core.message.components import Plain
-from astrbot.core.message.message_event_result import MessageChain
 
 from .config import PluginConfig
 
@@ -195,16 +191,21 @@ class QQMusicLogin:
         result_cookies["guid"] = hashlib.sha256(qrsig.encode()).hexdigest()[:32]
         return result_cookies, str(req0.get("code", ""))
 
-    async def start(self, event: AstrMessageEvent) -> None:
+    async def start(
+        self,
+        on_qr: Callable[[bytes], Awaitable[None]],
+        on_message: Callable[[str], Awaitable[None]],
+    ) -> None:
         """Request a QR code and start polling for login confirmation.
 
         Args:
-            event: The command event.
+            on_qr: Callback receiving the QR image as PNG bytes.
+            on_message: Callback receiving duplicate-session, completion, timeout,
+                or failure messages. It remains active during background polling.
         """
         async with self._start_lock:
             if self._task and not self._task.done():
-                await event.send(event.plain_result("已有 QQ 音乐登录会话正在等待扫码"))
-                event.stop_event()
+                await on_message("已有 QQ 音乐登录会话正在等待扫码")
                 return
 
             session = aiohttp.ClientSession(
@@ -237,22 +238,23 @@ class QQMusicLogin:
                 qrsig = self._cookie_values(session, qr_url).get("qrsig", "")
                 if not qrsig or not qr_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
                     raise RuntimeError("QQ 二维码接口未返回有效图片或 qrsig")
-                chain = [Plain("用QQ扫码登录:"), Image.fromBytes(qr_bytes)]
-                await event.send(MessageChain(chain))
+                await on_qr(qr_bytes)
                 self._task = asyncio.create_task(
-                    self._poll_login(event, session, qrsig, self._hash33(qrsig))
+                    self._poll_login(on_message, session, qrsig, self._hash33(qrsig))
                 )
+            except asyncio.CancelledError:
+                await session.close()
+                self._session = None
+                raise
             except Exception as exc:
                 await session.close()
                 self._session = None
                 logger.warning(f"[music] Could not start QQ Music QR login: {exc}")
-                await event.send(event.plain_result(f"无法开始 QQ 音乐登录：{exc}"))
-            finally:
-                event.stop_event()
+                await on_message(f"无法开始 QQ 音乐登录：{exc}")
 
     async def _poll_login(
         self,
-        event: AstrMessageEvent,
+        on_message: Callable[[str], Awaitable[None]],
         session: aiohttp.ClientSession,
         qrsig: str,
         ptqrtoken: int,
@@ -304,6 +306,7 @@ class QQMusicLogin:
                         logger.info(status_messages[status])
                     last_status = status
                 if status == "65":
+                    await on_message("QQ 登录二维码已过期，请重新登录")
                     return
                 if status != "0":
                     await asyncio.sleep(2)
@@ -336,17 +339,15 @@ class QQMusicLogin:
                 qqmusic_config.cookies = cookie_string
                 qqmusic_config.uin = uin
                 self.config.save_config()
-                await event.send(
-                    event.plain_result(f"QQ 音乐登录成功，Cookie已写入配置。QQ：{uin}")
-                )
+                await on_message(f"QQ 音乐登录成功，Cookie已写入配置。QQ：{uin}")
                 return
-            await event.send(event.plain_result("QQ 登录二维码已超时，请重新登录"))
+            await on_message("QQ 登录二维码已超时，请重新登录")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.warning(f"[music] QQ Music QR login failed: {exc}")
             with contextlib.suppress(Exception):
-                await event.send(event.plain_result(f"QQ 音乐登录失败：{exc}"))
+                await on_message(f"QQ 音乐登录失败：{exc}")
         finally:
             await session.close()
             if self._task is current_task:
@@ -355,11 +356,12 @@ class QQMusicLogin:
 
     async def close(self) -> None:
         """Cancel the active login task and release its HTTP session."""
-        task = self._task
-        if task and not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-        elif self._session and not self._session.closed:
-            await self._session.close()
-        self._task = None
-        self._session = None
+        async with self._start_lock:
+            task = self._task
+            if task and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            if self._session and not self._session.closed:
+                await self._session.close()
+            self._task = None
+            self._session = None
