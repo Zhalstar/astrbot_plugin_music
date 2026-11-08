@@ -11,6 +11,7 @@ from astrbot.api import logger
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.star.context import Context
 from astrbot.core.utils.astrbot_path import (
+    get_astrbot_plugin_data_path,
     get_astrbot_plugin_path,
     get_astrbot_temp_path,
 )
@@ -206,6 +207,8 @@ class PluginConfig(ConfigNode):
         self.default_template_file = self.plugin_dir / "default_template.json"
         self.font_path = self.plugin_dir / "fonts" / "simhei.ttf"
         self.temp_dir = Path(get_astrbot_temp_path())
+        self.data_dir = Path(get_astrbot_plugin_data_path()) / self._plugin_name
+        self.db_path = self.data_dir / "music.db"
 
         if self._migrate_legacy_send_modes():
             self.save_config()

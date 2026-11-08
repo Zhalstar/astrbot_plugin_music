@@ -1,14 +1,15 @@
 import re
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 
 from astrbot.api import logger
 
 from .config import PluginConfig
-from .kugou_login import KuGouLogin
 from .model import Song
+from .music_store import MusicStore
 from .platform import BaseMusicPlayer
-from .qqmusic_login import QQMusicLogin
+from .platform.kugou.kugou_login import KuGouLogin
+from .platform.qqmusic.qqmusic_login import QQMusicLogin
 
 
 @dataclass(slots=True)
@@ -38,6 +39,7 @@ class MusicService:
             config: Plugin configuration shared with the source adapters.
         """
         self.cfg = config
+        self.store = MusicStore(config.db_path)
         self.players: list[BaseMusicPlayer] = []
         self.qqmusic_login = QQMusicLogin(config)
         self.kugou_login = KuGouLogin(config)
@@ -48,6 +50,7 @@ class MusicService:
         Raises:
             Exception: If a source cannot be initialized.
         """
+        await self.store.initialize()
         if self.players:
             return
         enabled_platforms = set(self.cfg.players.enabled_platforms())
@@ -118,6 +121,47 @@ class MusicService:
             ),
             None,
         )
+
+    async def resolve_song(self, player: BaseMusicPlayer, song: Song) -> Song:
+        """Resolve replay metadata without switching song identity or source.
+
+        Args:
+            player: Enabled adapter that owns this song's playback entry.
+            song: Stored metadata or a search result to resolve.
+
+        Returns:
+            The song with a fresh audio URL when available. Search-only adapters
+            are refreshed by matching the exact source and platform song ID.
+            A missing match leaves the song without an audio URL.
+
+        Raises:
+            Exception: If the source cannot resolve or refresh the song.
+        """
+        song = await player.fetch_extra(song)
+        if song.audio_url or not song.name:
+            return song
+        source = (song.source or player.platform.name).strip().lower()
+        candidates = await player.fetch_songs(
+            keyword=" ".join(value for value in (song.name, song.artists) if value),
+            limit=self.cfg.search_config.song_limit,
+            extra=source,
+        )
+        match = next(
+            (
+                candidate
+                for candidate in candidates
+                if str(candidate.id).strip() == str(song.id).strip()
+                and (candidate.source or player.platform.name).strip().lower() == source
+            ),
+            None,
+        )
+        if match is not None:
+            for attribute in fields(Song):
+                value = getattr(match, attribute.name)
+                if value is not None:
+                    setattr(song, attribute.name, value)
+            song = await player.fetch_extra(song)
+        return song
 
     def get_players_by_priority(
         self, platform: str = "", *, fallback: bool = True

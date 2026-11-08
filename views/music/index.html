@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Music</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div class="workspace">
+      <button id="sidebar-scrim" class="sidebar-scrim" aria-label="Close menu"></button>
+      <aside id="sidebar" class="sidebar" aria-label="Music library">
+        <div class="brand">
+          <span data-icon="music"></span><strong>Music</strong>
+          <button id="collapse-sidebar" class="icon-button collapse-sidebar" type="button" data-icon="collapse" aria-controls="sidebar"></button>
+        </div>
+        <nav id="library-nav" class="side-nav" aria-label="Library"></nav>
+        <div class="side-section-title">
+          <span data-text="myPlaylists">My playlists</span>
+          <button id="new-playlist" class="icon-button" type="button" data-icon="plus"></button>
+        </div>
+        <nav id="playlist-nav" class="side-nav playlist-nav" aria-label="Playlists"></nav>
+        <div class="sidebar-footer">
+          <div id="source-count" class="source-count"></div>
+          <a class="plugin-info" href="https://github.com/Zhalslar/astrbot_plugin_music" target="_blank" rel="noopener noreferrer">astrbot_plugin_music<span>by Zhalslar <span data-icon="external"></span></span></a>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <button id="mobile-menu" class="icon-button mobile-menu" type="button" data-icon="menu" aria-controls="sidebar" aria-expanded="false"></button>
+          <form id="search-form" class="search-form" role="search">
+            <span class="search-icon" data-icon="search"></span>
+            <input id="query" type="search" maxlength="200" autocomplete="off" />
+            <button id="search-button" class="search-submit" type="submit" data-icon="search"></button>
+          </form>
+          <div id="source-rail" class="source-rail">
+            <button id="sources-left" class="icon-button source-scroll" type="button" data-icon="arrowLeft" aria-controls="source-tabs"></button>
+            <nav id="source-tabs" class="source-tabs" aria-label="Music sources"></nav>
+            <button id="sources-right" class="icon-button source-scroll" type="button" data-icon="arrowRight" aria-controls="source-tabs"></button>
+          </div>
+        </header>
+
+        <section id="catalog" class="catalog" aria-labelledby="view-title">
+          <header class="catalog-heading">
+            <div id="collection-art" class="collection-art" aria-hidden="true"></div>
+            <div class="catalog-copy">
+              <div id="view-eyebrow" class="eyebrow"></div>
+              <h1 id="view-title"></h1>
+              <div id="view-meta" class="view-meta"></div>
+            </div>
+            <div id="collection-actions" class="collection-actions"></div>
+          </header>
+          <div class="list-toolbar">
+            <div id="list-actions" class="list-actions"></div>
+            <span id="list-count" class="list-count"></span>
+          </div>
+          <div class="song-columns" aria-hidden="true">
+            <span>#</span><span></span><span></span><span data-text="song">Song</span>
+            <span data-text="artist">Artist</span><span data-text="source">Source</span>
+            <span data-text="duration">Duration</span><span></span>
+          </div>
+          <div id="list-status" class="list-status" role="status"></div>
+          <div id="song-list" class="song-list"></div>
+        </section>
+      </main>
+
+      <footer id="player" class="player" aria-label="Player">
+        <div class="now-playing">
+          <button id="player-cover" class="player-cover" type="button" aria-label="Open full player"></button>
+          <div class="player-copy">
+            <div id="player-title" class="player-title">Music</div>
+            <div id="player-artist" class="player-artist"></div>
+            <div id="player-status" class="player-status"></div>
+          </div>
+          <button id="player-favorite" class="icon-button" type="button" data-icon="heart"></button>
+        </div>
+        <div class="transport">
+          <div class="transport-buttons">
+            <button id="play-mode" class="icon-button" type="button" data-icon="sequence"></button>
+            <button id="previous" class="icon-button" type="button" data-icon="previous"></button>
+            <button id="toggle-play" class="play-button" type="button" data-icon="play"></button>
+            <button id="next" class="icon-button" type="button" data-icon="next"></button>
+            <button id="player-lyrics" class="icon-button" type="button" data-icon="lyrics"></button>
+          </div>
+          <div class="timeline">
+            <span id="elapsed">0:00</span>
+            <input id="progress" type="range" min="0" max="1000" value="0" step="1" />
+            <span id="total-time">0:00</span>
+          </div>
+        </div>
+        <div class="player-extras">
+          <button id="mute" class="icon-button" type="button" data-icon="volume"></button>
+          <input id="volume" class="volume" type="range" min="0" max="1" value="0.8" step="0.01" />
+          <button id="show-queue" class="icon-button queue-button" type="button" data-icon="queue"><span id="queue-count">0</span></button>
+          <button id="close-player" class="icon-button" type="button" data-icon="close"></button>
+        </div>
+      </footer>
+    </div>
+
+    <section id="full-player" class="full-player" aria-label="Now playing" hidden>
+      <div class="full-player-backdrop" aria-hidden="true"></div>
+      <header class="full-player-header">
+        <button id="full-player-close" class="icon-button" type="button" data-icon="down"></button>
+        <span data-text="nowPlaying">Now playing</span>
+        <button id="full-player-queue" class="icon-button" type="button" data-icon="queue"></button>
+      </header>
+      <div class="full-player-content">
+        <div class="full-player-art-wrap">
+          <div id="full-player-cover" class="full-player-cover"></div>
+          <div class="full-player-caption">
+            <div id="full-player-title"></div>
+            <div id="full-player-artist"></div>
+          </div>
+        </div>
+        <div class="full-player-lyrics-panel">
+          <div id="full-player-lyrics" class="full-player-lyrics" role="log" aria-live="polite"></div>
+        </div>
+      </div>
+      <div class="full-player-controls">
+        <div class="full-player-timeline">
+          <span id="full-player-elapsed">0:00</span>
+          <input id="full-player-progress" type="range" min="0" max="1000" value="0" step="1" />
+          <span id="full-player-total">0:00</span>
+        </div>
+        <div class="full-player-buttons">
+          <button id="full-player-mode" class="icon-button" type="button" data-icon="sequence"></button>
+          <button id="full-player-previous" class="icon-button" type="button" data-icon="previous"></button>
+          <button id="full-player-toggle" class="play-button" type="button" data-icon="play"></button>
+          <button id="full-player-next" class="icon-button" type="button" data-icon="next"></button>
+          <button id="full-player-favorite" class="icon-button" type="button" data-icon="heart"></button>
+        </div>
+      </div>
+    </section>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <div id="action-menu" class="action-menu" role="menu" hidden></div>
+    <dialog id="dialog" class="dialog" aria-labelledby="dialog-title">
+      <form id="dialog-form" method="dialog">
+        <header class="dialog-header text-h3 pa-4 pb-0 pl-6">
+          <h2 id="dialog-title"></h2>
+          <button id="dialog-close" class="icon-button" type="button" data-icon="close"></button>
+        </header>
+        <div id="dialog-body" class="dialog-body"></div>
+        <footer id="dialog-footer" class="dialog-footer"></footer>
+      </form>
+    </dialog>
+    <audio id="audio" preload="metadata"></audio>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

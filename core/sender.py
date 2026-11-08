@@ -767,6 +767,11 @@ class MusicSender:
             await event.send(event.plain_result("歌曲发送失败"))
             return False, False
 
+        try:
+            await self.music_service.store.record_play(player.platform.name, song)
+        except Exception:
+            logger.exception("Failed to record music history after sending a song")
+
         self.clear_selection_context(event)
         if self.cfg.search_config.recall_select:
             await self._recall_selection_message(event)

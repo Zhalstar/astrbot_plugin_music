@@ -19,6 +19,7 @@ from .core.platform import BaseMusicPlayer
 from .core.sender import MusicSender
 from .core.song_renderer import CardRenderer
 from .core.utils import parse_user_input
+from .core.web_controller import WebController
 
 
 class MusicPlugin(Star):
@@ -29,6 +30,7 @@ class MusicPlugin(Star):
         self.lyrics_renderer = LyricsRenderer(self.cfg)
         self.song_renderer = CardRenderer(self.cfg)
         self.music_service = MusicService(self.cfg)
+        self.web_controller = WebController(context, self.cfg, self.music_service)
         self.sender = MusicSender(
             self.cfg,
             self.context,
