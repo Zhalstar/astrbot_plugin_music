@@ -7,31 +7,37 @@ from .model import Song
 class SendMode(IntEnum):
     """Song send modes."""
 
-    CARD = 1
-    RECORD_LINK = 2
-    RECORD_LOCAL = 3
-    FILE_LINK = 4
-    FILE_LOCAL = 5
-    TEXT = 6
+    NATIVE_CARD = 1
+    ARK_CARD = 2
+    RECORD_LINK = 3
+    RECORD_LOCAL = 4
+    FILE_LINK = 5
+    FILE_LOCAL = 6
+    TEXT = 7
 
 
 # Mode alias map.
 MODE_MAP_CN: dict[str, SendMode] = {
-    "卡片": SendMode.CARD,
-    "语音": SendMode.RECORD_LOCAL,
+    "原生卡片": SendMode.NATIVE_CARD,
+    "卡片": SendMode.NATIVE_CARD,
+    "native_card": SendMode.NATIVE_CARD,
+    "card": SendMode.NATIVE_CARD,
+    "签名卡片": SendMode.ARK_CARD,
+    "ark_card": SendMode.ARK_CARD,
+    "ark": SendMode.ARK_CARD,
     "语音链接": SendMode.RECORD_LINK,
-    "本地语音": SendMode.RECORD_LOCAL,
-    "文件": SendMode.FILE_LOCAL,
-    "文件链接": SendMode.FILE_LINK,
-    "本地文件": SendMode.FILE_LOCAL,
-    "文本": SendMode.TEXT,
-    "card": SendMode.CARD,
-    "record": SendMode.RECORD_LOCAL,
     "record_link": SendMode.RECORD_LINK,
+    "语音": SendMode.RECORD_LOCAL,
+    "本地语音": SendMode.RECORD_LOCAL,
+    "record": SendMode.RECORD_LOCAL,
     "record_local": SendMode.RECORD_LOCAL,
-    "file": SendMode.FILE_LOCAL,
+    "文件链接": SendMode.FILE_LINK,
     "file_link": SendMode.FILE_LINK,
+    "文件": SendMode.FILE_LOCAL,
+    "本地文件": SendMode.FILE_LOCAL,
+    "file": SendMode.FILE_LOCAL,
     "file_local": SendMode.FILE_LOCAL,
+    "文本": SendMode.TEXT,
     "text": SendMode.TEXT,
 }
 
@@ -105,7 +111,8 @@ def parse_user_input(arg: str) -> tuple[int, list[str] | None, str | None]:
     way = None
     modes = None
     mode_map = {
-        SendMode.CARD: ["card"],
+        SendMode.NATIVE_CARD: ["native_card"],
+        SendMode.ARK_CARD: ["ark_card"],
         SendMode.RECORD_LINK: ["record_link"],
         SendMode.RECORD_LOCAL: ["record_local"],
         SendMode.FILE_LINK: ["file_link"],
@@ -125,13 +132,13 @@ def parse_user_input(arg: str) -> tuple[int, list[str] | None, str | None]:
         # 尝试解析为数字
         if second_part.isdigit():
             mode_value = int(second_part)
-            if 1 <= mode_value <= 6:
+            if 1 <= mode_value <= 7:
                 way = SendMode(mode_value)
             else:
                 return (
                     0,
                     None,
-                    "模式数字应为 1-6：1卡片 2语音链接 3本地语音 4文件链接 5本地文件 6文本",
+                    "模式数字应为 1-7：1原生卡片 2签名卡片 3语音链接 4本地语音 5文件链接 6本地文件 7文本",
                 )
         else:
             # 尝试匹配文本模式
@@ -141,8 +148,8 @@ def parse_user_input(arg: str) -> tuple[int, list[str] | None, str | None]:
                     0,
                     None,
                     "未知模式「"
-                    f"{second_part}」，可用模式：卡片/语音/语音链接/本地语音/文件/文件链接/本地文件/文本 "
-                    "或 1/2/3/4/5/6",
+                    f"{second_part}」，可用模式：原生卡片/签名卡片/语音/语音链接/本地语音/文件/文件链接/本地文件/文本 "
+                    "或 1/2/3/4/5/6/7",
                 )
     modes = mode_map.get(way) if way else None
     return index, modes, None
