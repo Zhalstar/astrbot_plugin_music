@@ -12,18 +12,6 @@
     "enc_params": "D33zyir4L/58v1qGPcIPjSee79KCzxBIBy507IYDB8EL7jEnp41aDIqpHBhowfQ6iT1Xoka8jD+0p44nRKNKUA0dv+n5RWPOO57dZLVrd+T1J/sNrTdzUhdHhoKRIgegVcXYjYu+CshdtCBe6WEJozBRlaHyLeJtGrABfMOEb4PqgI3h/uELC82S05NtewlbLZ3TOR/TIIhNV6hVTtqHDVHjkekrvEmJzT5pk1UY6r0="
   },
   {
-    "__template_key": "netease_api",
-    "enable": true,
-    "priority": 10,
-    "trigger_words": [
-      "网易api点歌"
-    ],
-    "base_url": "https://zm.wwoyun.cn",
-    "api_token": "",
-    "cookies": "",
-    "proxy": ""
-  },
-  {
     "__template_key": "kuwo",
     "enable": true,
     "priority": 15,
@@ -52,16 +40,6 @@
       "酷狗点歌"
     ],
     "cookies": "",
-    "proxy": ""
-  },
-  {
-    "__template_key": "kugou_api",
-    "enable": true,
-    "priority": 40,
-    "trigger_words": [
-      "酷狗api点歌"
-    ],
-    "base_url": "http://127.0.0.1:3000",
     "proxy": ""
   },
   {

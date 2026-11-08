@@ -98,6 +98,7 @@
                 "description": "签名卡片 API key",
                 "hint": "启用 签名卡片 发送方式时需填写。当前版本推荐使用的站点地址：https://apii.xianyuw.cn，注册后在用户中心复制API令牌填在此处",
                 "type": "string",
+                "secret": true,
                 "default": ""
             },
             "record_unsupported": {
@@ -299,6 +300,15 @@
                             "环绕声（20501K MFLAC）",
                             "母带（20900K MFLAC）"
                         ],
+                        "subtitles": [
+                            "",
+                            "",
+                            "",
+                            "需额外依赖",
+                            "需额外依赖",
+                            "需额外依赖",
+                            "需额外依赖"
+                        ],
                         "default": "lossless"
                     },
                     "proxy": {
@@ -350,7 +360,7 @@
                         "default": ""
                     },
                     "enable_xiaobai_fallback": {
-                        "description": "启用小白备用音源",
+                        "description": "备用音源",
                         "hint": "官方音频获取失败或校验不通过时，按同一首 QQ 歌曲的 ID 尝试小白音乐。无需向备用源提供 QQ 登录态；完整音频可用性取决于上游。",
                         "type": "bool",
                         "default": true
