@@ -7,7 +7,7 @@ const t = (key) => bridge.t(`views.music.${key}`, key);
 const $ = (id) => document.getElementById(id);
 const elements = Object.fromEntries(
   [
-    "library-nav", "playlist-nav", "new-playlist", "source-count", "search-form",
+    "library-nav", "playlist-nav", "new-playlist", "import-playlist", "source-count", "search-form",
     "query", "search-button", "source-tabs", "catalog", "collection-art", "view-eyebrow",
     "view-title", "view-meta", "collection-actions", "list-actions", "list-count",
     "list-status", "song-list", "player-cover", "player-title", "player-artist",
@@ -231,7 +231,8 @@ function applyStaticText() {
   elements.searchButton.title = t("searchButton");
   elements.searchButton.setAttribute("aria-label", t("searchButton"));
   for (const [key, iconName, label] of [
-    ["newPlaylist", "plus", "createPlaylist"], ["mobileMenu", "menu", "menu"],
+    ["newPlaylist", "plus", "createPlaylist"], ["importPlaylist", "download", "importPlaylist"],
+    ["mobileMenu", "menu", "menu"],
     ["collapseSidebar", "collapse", "collapseSidebar"],
     ["sourcesLeft", "arrowLeft", "sourcesLeft"], ["sourcesRight", "arrowRight", "sourcesRight"],
     ["previous", "previous", "previous"], ["next", "next", "next"],
@@ -589,6 +590,41 @@ function createPlaylist(item = null) {
   }, t("create"));
 }
 
+function importPlaylist() {
+  const input = document.createElement("input");
+  input.className = "dialog-input";
+  input.type = "url";
+  input.maxLength = 2000;
+  input.placeholder = t("playlistUrl");
+  const submit = async () => {
+    const reference = input.value.trim();
+    if (!reference) return input.focus();
+    const buttons = elements.dialogFooter.querySelectorAll("button");
+    buttons.forEach((button) => { button.disabled = true; });
+    try {
+      const result = await bridge.apiPost("playlists/import", { reference });
+      elements.dialog.close();
+      await refreshPlaylists();
+      toast(`${t("playlistImported")} (${result.imported})`);
+      await loadView({ type: "playlist", id: result.playlist.id });
+    } catch (error) {
+      toast(error?.message || t("playlistImportFailed"));
+      buttons.forEach((button) => { button.disabled = false; });
+    }
+  };
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      submit();
+    }
+  });
+  showDialog(t("importPlaylist"), input, [
+    { label: t("cancel"), action: () => elements.dialog.close() },
+    { label: t("import"), primary: true, action: submit },
+  ]);
+  setTimeout(() => input.focus());
+}
+
 function renamePlaylist(id) {
   const playlist = state.playlists.find((candidate) => candidate.id === id);
   if (!playlist) return;
@@ -849,6 +885,7 @@ function bindEvents() {
     search(elements.query.value);
   });
   elements.newPlaylist.addEventListener("click", () => createPlaylist());
+  elements.importPlaylist.addEventListener("click", importPlaylist);
   elements.dialogClose.addEventListener("click", () => elements.dialog.close());
   elements.mobileMenu.addEventListener("click", () => setSidebarOpen(true));
   elements.collapseSidebar.addEventListener("click", () => setSidebarOpen(false));
@@ -910,6 +947,7 @@ function bindEvents() {
     entries[index]?.focus();
   });
   setButtonIcon(elements.newPlaylist, "plus", t("createPlaylist"));
+  setButtonIcon(elements.importPlaylist, "download", t("importPlaylist"));
   setButtonIcon(elements.mobileMenu, "menu", t("menu"));
   setButtonIcon(elements.previous, "previous", t("previous"));
   setButtonIcon(elements.next, "next", t("next"));

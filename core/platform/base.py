@@ -11,7 +11,7 @@ import aiohttp
 from astrbot.api import logger
 
 from ..config import MusicPlayerItem, PluginConfig
-from ..model import Platform, Song
+from ..model import Platform, Playlist, Song
 
 
 class BaseMusicPlayer(ABC):
@@ -29,6 +29,8 @@ class BaseMusicPlayer(ABC):
     """ 平台信息（包含名称和显示名称） """
     supported_audio_qualities: ClassVar[tuple[str, ...]] = ("standard",)
     """Audio quality identifiers supported by this platform."""
+    supports_playlist_import: ClassVar[bool] = False
+    """Whether this adapter can import a remote playlist."""
     platform_cfg: MusicPlayerItem
 
     HEADERS = {
@@ -71,6 +73,24 @@ class BaseMusicPlayer(ABC):
         raise NotImplementedError
 
     # ---------- 可复用方法 ----------
+    async def fetch_playlist(self, reference: str, limit: int = 1000) -> Playlist:
+        """Fetch a remote playlist when the adapter supports it.
+
+        Args:
+            reference: Platform playlist ID or a recognized share URL.
+            limit: Maximum number of songs to return.
+
+        Returns:
+            Normalized playlist metadata and songs.
+
+        Raises:
+            NotImplementedError: If this adapter has no playlist integration.
+        """
+        del reference, limit
+        raise NotImplementedError(
+            f"{self.platform.display_name} does not support playlist import"
+        )
+
     @abstractmethod
     async def fetch_extra(self, song: Song) -> Song:
         """Fetch platform-specific metadata required for sending a song.

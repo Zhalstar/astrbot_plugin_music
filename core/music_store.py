@@ -176,7 +176,7 @@ class MusicStore:
         async with self._connect() as db:
             await db.execute("BEGIN")
             async with db.execute("SELECT COUNT(*) FROM favorites") as cursor:
-                total = (await cursor.fetchone())[0]
+                total = (await cursor.fetchone())[0]  # type: ignore
             async with db.execute(
                 "SELECT songs.*, favorites.added_at FROM favorites "
                 "JOIN songs ON songs.id = favorites.song_id "
@@ -656,6 +656,58 @@ class MusicStore:
                 )
             await db.commit()
         return added
+
+    async def import_playlist(
+        self, name: str, player: str, songs: list[Song]
+    ) -> tuple[int, int, int]:
+        """Create a playlist and import its songs in one transaction.
+
+        Args:
+            name: Local playlist name.
+            player: Adapter identifier used to replay imported songs.
+            songs: Remote songs in playlist order.
+
+        Returns:
+            Local playlist ID, imported count, and duplicate count.
+
+        Raises:
+            ValueError: If the name, player, or a song ID is empty.
+        """
+        name = name.strip()
+        player = player.strip().lower()
+        if not name:
+            raise ValueError("playlist name must not be empty")
+        if not player:
+            raise ValueError("player must not be empty")
+        now = time.time()
+        async with self._connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                async with db.execute(
+                    "INSERT INTO playlists (name, created_at, updated_at) "
+                    "VALUES (?, ?, ?)",
+                    (name, now, now),
+                ) as cursor:
+                    playlist_id = cursor.lastrowid
+                assert playlist_id is not None
+                imported = 0
+                for song in songs:
+                    song_id = await self._save_song(db, player, song)
+                    async with db.execute(
+                        """
+                        INSERT INTO playlist_songs (
+                            playlist_id, song_id, position, added_at
+                        ) VALUES (?, ?, ?, ?)
+                        ON CONFLICT (playlist_id, song_id) DO NOTHING
+                        """,
+                        (playlist_id, song_id, imported, now),
+                    ) as cursor:
+                        imported += int(cursor.rowcount > 0)
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        return playlist_id, imported, len(songs) - imported
 
     async def list_playlist_songs(
         self, playlist_id: int, *, limit: int = 50, offset: int = 0

@@ -2,15 +2,16 @@ import base64
 import binascii
 import hashlib
 import json
+import re
 import time
 import uuid
 from typing import Any, ClassVar
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlparse
 
 from astrbot.api import logger
 
 from ...config import PluginConfig
-from ...model import Platform, Song
+from ...model import Platform, Playlist, Song
 from ..base import BaseMusicPlayer
 
 
@@ -21,6 +22,7 @@ class KuGouMusic(BaseMusicPlayer):
         name="kugou",
         display_name="酷狗音乐",
     )
+    supports_playlist_import = True
 
     APP_ID = "1005"
     CLIENT_VERSION = "20489"
@@ -195,6 +197,146 @@ class KuGouMusic(BaseMusicPlayer):
                 )
             )
         return songs
+
+    async def fetch_playlist(self, reference: str, limit: int = 1000) -> Playlist:
+        """Fetch a KuGou playlist from its official mobile share page.
+
+        Args:
+            reference: KuGou song-list share URL containing a GCID.
+            limit: Maximum number of songs to import.
+
+        Returns:
+            Playlist metadata and normalized KuGou songs.
+
+        Raises:
+            ValueError: If the reference or limit is invalid.
+            RuntimeError: If KuGou does not return valid playlist data.
+        """
+        if not 1 <= limit <= 1000:
+            raise ValueError("playlist import limit must be between 1 and 1000")
+        parsed = urlparse(reference.strip())
+        hostname = (parsed.hostname or "").lower()
+        if parsed.scheme not in {"http", "https"} or not (
+            hostname == "kugou.com" or hostname.endswith(".kugou.com")
+        ):
+            raise ValueError("invalid KuGou playlist URL")
+        match = re.search(r"/(gcid_[A-Za-z0-9]+)/?", parsed.path)
+        if match:
+            playlist_id = match.group(1)
+        else:
+            source_id = parse_qs(parsed.query).get("src_cid", [""])[0]
+            playlist_id = f"gcid_{source_id}" if source_id else ""
+        if not playlist_id:
+            raise ValueError("KuGou playlist URL does not contain a GCID")
+
+        share_url = f"https://m.kugou.com/songlist/{playlist_id}/"
+        try:
+            async with self._get_session().get(
+                share_url,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Linux; Android 15; Pixel 8) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/130.0 Mobile Safari/537.36"
+                    ),
+                    "Referer": "https://m.kugou.com/",
+                },
+                proxy=self.platform_cfg.proxy or None,
+                timeout=20,
+            ) as response:
+                if response.status != 200:
+                    raise RuntimeError(
+                        f"KuGou playlist page returned HTTP {response.status}"
+                    )
+                content = await response.text()
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"KuGou playlist request failed: {exc}") from exc
+
+        output_match = re.search(
+            r"window\.\$output\s*=\s*(\{.*?\});\s*</script>",
+            content,
+            re.DOTALL,
+        )
+        if output_match is None:
+            raise RuntimeError("KuGou playlist page did not contain playlist data")
+        try:
+            output = json.loads(output_match.group(1))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("KuGou playlist page returned invalid data") from exc
+        info = output.get("info") if isinstance(output, dict) else None
+        metadata = info.get("listinfo") if isinstance(info, dict) else None
+        items = info.get("songs") if isinstance(info, dict) else None
+        if not isinstance(metadata, dict) or not isinstance(items, list):
+            raise RuntimeError("KuGou playlist page returned incomplete data")
+
+        songs: list[Song] = []
+        for item in items[:limit]:
+            if not isinstance(item, dict):
+                continue
+            song_hash = str(item.get("hash") or "")
+            if not song_hash:
+                continue
+            singer_info = item.get("singerinfo")
+            artists = (
+                "、".join(
+                    singer.get("name", "")
+                    for singer in singer_info
+                    if isinstance(singer, dict) and singer.get("name")
+                )
+                if isinstance(singer_info, list)
+                else ""
+            )
+            raw_name = str(item.get("name") or "")
+            name = raw_name.split(" - ", 1)[1] if " - " in raw_name else raw_name
+            cover = item.get("cover")
+            if isinstance(cover, str):
+                cover = cover.replace("{size}", "400")
+                if cover.startswith("http://"):
+                    cover = f"https://{cover[7:]}"
+            page_url = item.get("_song_url")
+            if isinstance(page_url, str) and page_url.startswith("http://"):
+                page_url = f"https://{page_url[7:]}"
+            album_id = item.get("album_id")
+            album_audio_id = item.get("mixsongid") or item.get("add_mixsongid")
+            songs.append(
+                Song(
+                    id=song_hash,
+                    source=self.platform.name,
+                    card_type="kugou",
+                    name=str(name) if name else None,
+                    artists=artists or None,
+                    duration=int(item["timelen"]) if item.get("timelen") else None,
+                    cover_url=cover if isinstance(cover, str) else None,
+                    page_url=page_url
+                    if isinstance(page_url, str)
+                    else f"https://www.kugou.com/song/#hash={quote(song_hash)}",
+                    note=(
+                        item.get("albuminfo", {}).get("name")
+                        if isinstance(item.get("albuminfo"), dict)
+                        else None
+                    ),
+                    album_id=int(album_id) if album_id else None,
+                    album_audio_id=int(album_audio_id) if album_audio_id else None,
+                )
+            )
+        if not songs:
+            raise RuntimeError("KuGou playlist is empty or unavailable")
+        cover_url = metadata.get("pic")
+        if isinstance(cover_url, str):
+            cover_url = cover_url.replace("{size}", "400")
+            if cover_url.startswith("http://"):
+                cover_url = f"https://{cover_url[7:]}"
+        return Playlist(
+            id=playlist_id,
+            source=self.platform.name,
+            name=str(metadata.get("name") or f"酷狗歌单 {playlist_id}"),
+            songs=songs,
+            cover_url=cover_url if isinstance(cover_url, str) else None,
+            creator=metadata.get("list_create_username"),
+            description=metadata.get("intro"),
+        )
 
     async def fetch_extra(self, song: Song) -> Song:
         """Resolve playback data and fill missing song metadata.

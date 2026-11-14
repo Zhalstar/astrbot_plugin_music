@@ -16,6 +16,7 @@ from .core.config import PluginConfig
 from .core.lyrics_renderer import LyricsRenderer
 from .core.music_service import MusicService
 from .core.platform import BaseMusicPlayer
+from .core.public_api import MusicApi
 from .core.sender import MusicSender
 from .core.song_renderer import CardRenderer
 from .core.utils import parse_user_input
@@ -30,6 +31,7 @@ class MusicPlugin(Star):
         self.lyrics_renderer = LyricsRenderer(self.cfg)
         self.song_renderer = CardRenderer(self.cfg)
         self.music_service = MusicService(self.cfg)
+        self.music_api = MusicApi(self.music_service)
         self.web_controller = WebController(context, self.cfg, self.music_service)
         self.sender = MusicSender(
             self.cfg,
@@ -40,36 +42,46 @@ class MusicPlugin(Star):
         )
         self.trigger_routes: dict[str, tuple[BaseMusicPlayer, str | None]] = {}
 
-    async def initialize(self):
-        """Initialize music sources and build chat command routes."""
-        await self.music_service.initialize()
-        self.trigger_routes.clear()
-        for player in self.music_service.players:
-            for trigger in player.platform_cfg.trigger_words or []:
-                command, separator, source = trigger.partition(":")
-                command = command.strip().lower()
-                if not command:
-                    continue
-                self.trigger_routes[command] = (
-                    player,
-                    source.strip() if separator and source.strip() else None,
-                )
-        logger.debug(
-            f"Registered music trigger words: {['点歌', *self.trigger_routes]}"
-        )
+    async def initialize(self) -> None:
+        """Initialize music sources and command routes.
+
+        Raises:
+            BaseException: If initialization fails, after releasing resources.
+        """
+        try:
+            await self.music_service.initialize()
+            self.trigger_routes.clear()
+            for player in self.music_service.players:
+                for trigger in player.platform_cfg.trigger_words or []:
+                    command, separator, source = trigger.partition(":")
+                    command = command.strip().lower()
+                    if not command:
+                        continue
+                    self.trigger_routes[command] = (
+                        player,
+                        source.strip() if separator and source.strip() else None,
+                    )
+            logger.debug(
+                f"Registered music trigger words: {['点歌', *self.trigger_routes]}"
+            )
+        except BaseException:
+            await self.terminate()
+            raise
 
     @filter.on_platform_loaded()
     async def _on_platform_loaded(self) -> None:
         """Register QQ interaction handling before the platform starts."""
         self.sender.set_interaction_create()
 
-    async def terminate(self):
-        """Close plugin resources and unload the music service."""
+    async def terminate(self) -> None:
+        """Release message and music resources owned by the plugin."""
         try:
             await self.sender.close()
         finally:
-            await self.music_service.close()
-            self.trigger_routes.clear()
+            try:
+                await self.music_service.close()
+            finally:
+                self.trigger_routes.clear()
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("登录Q音", alias={"登录QQ音乐"})

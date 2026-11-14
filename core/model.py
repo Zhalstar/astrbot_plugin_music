@@ -70,6 +70,19 @@ class Song:
 
 
 @dataclass(slots=True)
+class Playlist:
+    """Platform playlist metadata and its importable songs."""
+
+    id: str
+    source: str
+    name: str
+    songs: list[Song]
+    cover_url: str | None = None
+    creator: str | None = None
+    description: str | None = None
+
+
+@dataclass(slots=True)
 class Platform:
     """平台信息"""
 

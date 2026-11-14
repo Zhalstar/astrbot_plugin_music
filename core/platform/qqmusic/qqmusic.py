@@ -1,6 +1,7 @@
 import asyncio
 import gzip
 import json
+import re
 import urllib.parse
 import urllib.request
 import uuid
@@ -12,7 +13,7 @@ import aiofiles
 from astrbot.api import logger
 
 from ...config import PluginConfig
-from ...model import Platform, Song
+from ...model import Platform, Playlist, Song
 from ..base import BaseMusicPlayer
 
 
@@ -25,6 +26,7 @@ class QQMusic(BaseMusicPlayer):
     )
 
     API_URL = "https://u.y.qq.com/cgi-bin/musicu.fcg"
+    supports_playlist_import = True
     LYRIC_API_URL = "https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg"
     COMMENTS_API_URL = "https://c.y.qq.com/base/fcgi-bin/fcg_global_comment_h5.fcg"
     DOWNLOAD_HEADERS: ClassVar[dict[str, str]] = {
@@ -272,6 +274,116 @@ class QQMusic(BaseMusicPlayer):
                 )
             )
         return songs
+
+    async def fetch_playlist(self, reference: str, limit: int = 1000) -> Playlist:
+        """Fetch a QQ Music playlist through musicu.fcg.
+
+        Args:
+            reference: Numeric playlist ID or a y.qq.com playlist URL.
+            limit: Maximum number of songs to import.
+
+        Returns:
+            Playlist metadata and normalized QQ Music songs.
+
+        Raises:
+            ValueError: If the reference or limit is invalid.
+            RuntimeError: If QQ Music rejects or cannot find the playlist.
+        """
+        value = reference.strip()
+        playlist_id = value if value.isdigit() else ""
+        if not playlist_id:
+            parsed = urllib.parse.urlparse(value)
+            hostname = (parsed.hostname or "").lower()
+            if parsed.scheme not in {"http", "https"} or not (
+                hostname == "y.qq.com" or hostname.endswith(".y.qq.com")
+            ):
+                raise ValueError("invalid QQ Music playlist URL")
+            query = urllib.parse.parse_qs(parsed.query)
+            playlist_id = query.get("id", query.get("disstid", [""]))[0]
+            if not playlist_id:
+                match = re.search(r"/playlist/(\d+)", parsed.path)
+                playlist_id = match.group(1) if match else ""
+        if not playlist_id.isdigit():
+            raise ValueError("QQ Music playlist ID must be numeric")
+        if not 1 <= limit <= 1000:
+            raise ValueError("playlist import limit must be between 1 and 1000")
+
+        cookie = self._get_cookie()
+        configured_uin = (self.platform_cfg.uin or "").strip() or "10001"
+        body = {
+            "comm": {
+                "ct": "19",
+                "cv": "1859",
+                "uin": configured_uin,
+                "g_tk": self.get_gtk(cookie),
+            },
+            "req": {
+                "module": "music.srfDissInfo.aiDissInfo",
+                "method": "uniform_get_Dissinfo",
+                "param": {
+                    "disstid": int(playlist_id),
+                    "enc_host_uin": "",
+                    "tag": 1,
+                    "userinfo": 1,
+                    "song_begin": 0,
+                    "song_num": limit,
+                },
+            },
+        }
+        result = await self._post_musicu(body, cookie)
+        response = result.get("req") if isinstance(result, dict) else None
+        data = response.get("data") if isinstance(response, dict) else None
+        items = data.get("songlist") if isinstance(data, dict) else None
+        metadata = data.get("dirinfo") if isinstance(data, dict) else None
+        if not isinstance(items, list) or not isinstance(metadata, dict):
+            raise RuntimeError("QQ Music could not load playlist")
+
+        songs: list[Song] = []
+        for item in items[:limit]:
+            if not isinstance(item, dict) or not item.get("id") or not item.get("mid"):
+                continue
+            singers = "/".join(
+                singer.get("name")
+                for singer in item.get("singer", [])
+                if isinstance(singer, dict) and singer.get("name")
+            )
+            album = item.get("album") or {}
+            album_mid = album.get("mid") if isinstance(album, dict) else ""
+            interval = item.get("interval") or 0
+            songs.append(
+                Song(
+                    id=str(item["id"]),
+                    source=self.platform.name,
+                    card_type="qq",
+                    name=item.get("name"),
+                    artists=singers,
+                    duration=interval * 1000 if interval else None,
+                    cover_url=(
+                        f"https://y.gtimg.cn/music/photo_new/"
+                        f"T002R300x300M000{album_mid}.jpg"
+                        if album_mid
+                        else None
+                    ),
+                    page_url=f"https://y.qq.com/n/ryqq/songDetail/{item['mid']}",
+                    note=str(item["mid"]),
+                )
+            )
+        if not songs:
+            raise RuntimeError("QQ Music playlist is empty or unavailable")
+        creator = metadata.get("creator")
+        return Playlist(
+            id=playlist_id,
+            source=self.platform.name,
+            name=str(metadata.get("title") or f"QQ 音乐歌单 {playlist_id}"),
+            songs=songs,
+            cover_url=metadata.get("picurl"),
+            creator=(
+                creator.get("nick")
+                if isinstance(creator, dict)
+                else metadata.get("host_nick")
+            ),
+            description=metadata.get("desc"),
+        )
 
     async def fetch_extra(self, song: Song) -> Song:
         """Resolve a QQ Music audio URL using the song's official song MID.

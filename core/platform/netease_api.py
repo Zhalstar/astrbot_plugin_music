@@ -1,9 +1,11 @@
+import re
 from typing import ClassVar
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from astrbot.api import logger
 
 from ..config import PluginConfig
-from ..model import Platform, Song
+from ..model import Platform, Playlist, Song
 from .base import BaseMusicPlayer
 
 
@@ -18,6 +20,7 @@ class NetEaseMusicAPI(BaseMusicPlayer):
     )
     DEFAULT_BASE_URL = "https://zm.wwoyun.cn"
     base_url: str
+    supports_playlist_import = True
 
     def __init__(self, config: PluginConfig):
         super().__init__(config)
@@ -72,6 +75,89 @@ class NetEaseMusicAPI(BaseMusicPlayer):
                 )
             )
         return parsed_songs
+
+    async def fetch_playlist(self, reference: str, limit: int = 1000) -> Playlist:
+        """Fetch a NetEase playlist through the configured NodeJS API.
+
+        Args:
+            reference: Numeric playlist ID or a music.163.com playlist URL.
+            limit: Maximum number of songs to import.
+
+        Returns:
+            Playlist metadata and normalized NetEase songs.
+
+        Raises:
+            ValueError: If the reference or limit is invalid.
+            RuntimeError: If playlist metadata or tracks cannot be loaded.
+        """
+        value = reference.strip()
+        playlist_id = value if value.isdigit() else ""
+        if not playlist_id:
+            parsed = urlparse(value)
+            if parsed.scheme not in {"http", "https"} or parsed.hostname not in {
+                "music.163.com",
+                "m.music.163.com",
+            }:
+                raise ValueError("invalid NetEase playlist URL")
+            playlist_id = parse_qs(parsed.query).get("id", [""])[0]
+            if not playlist_id:
+                match = re.search(r"/playlist/(\d+)", parsed.path)
+                playlist_id = match.group(1) if match else ""
+        if not playlist_id.isdigit():
+            raise ValueError("NetEase playlist ID must be numeric")
+        if not 1 <= limit <= 1000:
+            raise ValueError("playlist import limit must be between 1 and 1000")
+
+        detail = await self._request(
+            f"{self.base_url}/playlist/detail?{urlencode({'id': playlist_id})}",
+            headers=self.api_headers,
+        )
+        metadata = detail.get("playlist") if isinstance(detail, dict) else None
+        if not isinstance(metadata, dict) or not metadata.get("name"):
+            raise RuntimeError("NetEase API could not load playlist details")
+        result = await self._request(
+            f"{self.base_url}/playlist/track/all?"
+            f"{urlencode({'id': playlist_id, 'limit': limit, 'offset': 0})}",
+            headers=self.api_headers,
+        )
+        items = result.get("songs") if isinstance(result, dict) else None
+        if not isinstance(items, list):
+            raise RuntimeError("NetEase API could not load playlist tracks")
+
+        songs: list[Song] = []
+        for item in items[:limit]:
+            if not isinstance(item, dict) or item.get("id") is None:
+                continue
+            artists = item.get("artists") or item.get("ar") or []
+            album = item.get("album") or item.get("al") or {}
+            songs.append(
+                Song(
+                    id=str(item["id"]),
+                    source=self.platform.name,
+                    card_type="163",
+                    name=item.get("name"),
+                    artists="、".join(
+                        artist["name"]
+                        for artist in artists
+                        if isinstance(artist, dict) and artist.get("name")
+                    ),
+                    duration=item.get("duration") or item.get("dt"),
+                    cover_url=album.get("picUrl") if isinstance(album, dict) else None,
+                    page_url=f"https://music.163.com/song?id={item['id']}",
+                )
+            )
+        if not songs:
+            raise RuntimeError("NetEase playlist is empty or unavailable")
+        creator = metadata.get("creator")
+        return Playlist(
+            id=playlist_id,
+            source=self.platform.name,
+            name=str(metadata["name"]),
+            songs=songs,
+            cover_url=metadata.get("coverImgUrl"),
+            creator=creator.get("nickname") if isinstance(creator, dict) else None,
+            description=metadata.get("description"),
+        )
 
     async def fetch_comments(self, song: Song) -> Song:
         if song.comments:

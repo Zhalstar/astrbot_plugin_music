@@ -1,3 +1,4 @@
+import re
 from typing import ClassVar
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -6,7 +7,7 @@ import aiohttp
 from astrbot.api import logger
 
 from ..config import PluginConfig
-from ..model import Platform, Song
+from ..model import Platform, Playlist, Song
 from .base import BaseMusicPlayer
 
 
@@ -18,6 +19,7 @@ class NetEaseMusic(BaseMusicPlayer):
         display_name="网易云音乐",
     )
     API_URL = "https://api.qijieya.cn/meting/"
+    supports_playlist_import = True
 
     def __init__(self, config: PluginConfig):
         super().__init__(config)
@@ -100,6 +102,94 @@ class NetEaseMusic(BaseMusicPlayer):
                 )
             )
         return songs
+
+    async def fetch_playlist(self, reference: str, limit: int = 1000) -> Playlist:
+        """Fetch a NetEase playlist through Meting.
+
+        Args:
+            reference: Numeric playlist ID or a music.163.com playlist URL.
+            limit: Maximum number of songs to import.
+
+        Returns:
+            Playlist metadata and normalized NetEase songs.
+
+        Raises:
+            ValueError: If the reference is not a recognized NetEase playlist.
+            RuntimeError: If the remote service does not return playlist songs.
+        """
+        value = reference.strip()
+        playlist_id = value if value.isdigit() else ""
+        if not playlist_id:
+            parsed = urlparse(value)
+            if parsed.scheme not in {"http", "https"} or parsed.hostname not in {
+                "music.163.com",
+                "m.music.163.com",
+            }:
+                raise ValueError("invalid NetEase playlist URL")
+            playlist_id = parse_qs(parsed.query).get("id", [""])[0]
+            if not playlist_id:
+                match = re.search(r"/playlist/(\d+)", parsed.path)
+                playlist_id = match.group(1) if match else ""
+        if not playlist_id.isdigit():
+            raise ValueError("NetEase playlist ID must be numeric")
+        if not 1 <= limit <= 1000:
+            raise ValueError("playlist import limit must be between 1 and 1000")
+
+        result = await self._request(
+            self._build_api_url(server="netease", type="playlist", id=playlist_id)
+        )
+        if not isinstance(result, list):
+            raise RuntimeError("NetEase playlist service returned invalid data")
+        songs: list[Song] = []
+        for item in result[:limit]:
+            if not isinstance(item, dict):
+                continue
+            song_id = item.get("id")
+            if not song_id and isinstance(item.get("url"), str):
+                song_id = parse_qs(urlparse(item["url"]).query).get("id", [None])[0]
+            if not song_id:
+                continue
+            artists = item.get("artist") or ""
+            if isinstance(artists, list):
+                artists = "、".join(
+                    artist.get("name", "") if isinstance(artist, dict) else str(artist)
+                    for artist in artists
+                )
+            songs.append(
+                Song(
+                    id=str(song_id),
+                    source=self.platform.name,
+                    card_type="163",
+                    name=item.get("name"),
+                    artists=str(artists),
+                    cover_url=item.get("pic")
+                    if isinstance(item.get("pic"), str)
+                    else None,
+                    page_url=f"https://music.163.com/song?id={song_id}",
+                )
+            )
+        if not songs:
+            raise RuntimeError("NetEase playlist is empty or unavailable")
+
+        detail = await self._request(
+            f"https://music.163.com/api/v6/playlist/detail?id={playlist_id}"
+        )
+        metadata = detail.get("playlist") if isinstance(detail, dict) else None
+        creator = metadata.get("creator") if isinstance(metadata, dict) else None
+        return Playlist(
+            id=playlist_id,
+            source=self.platform.name,
+            name=(metadata.get("name") if isinstance(metadata, dict) else None)
+            or f"网易云歌单 {playlist_id}",
+            songs=songs,
+            cover_url=metadata.get("coverImgUrl")
+            if isinstance(metadata, dict)
+            else None,
+            creator=creator.get("nickname") if isinstance(creator, dict) else None,
+            description=metadata.get("description")
+            if isinstance(metadata, dict)
+            else None,
+        )
 
     async def fetch_extra(self, song: Song) -> Song:
         """Fetch playback, cover, and lyric links from the Meting song endpoint.

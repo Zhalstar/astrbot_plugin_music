@@ -4,11 +4,11 @@ import secrets
 import string
 from pathlib import Path
 from typing import ClassVar
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from astrbot.api import logger
 
-from ..model import Platform, Song
+from ..model import Platform, Playlist, Song
 from .base import BaseMusicPlayer
 
 
@@ -21,6 +21,7 @@ class KuwoMusic(BaseMusicPlayer):
     )
 
     SEARCH_URL = "http://search.kuwo.cn/r.s"
+    PLAYLIST_URL = "https://nplserver.kuwo.cn/pl.svc"
     TRACK_URL = "https://changenotice.kuwo.cn/mobi.s"
     DETAIL_URL = "http://musicpay.kuwo.cn/music.pay"
     SEARCH_API_URL = SEARCH_URL
@@ -38,6 +39,7 @@ class KuwoMusic(BaseMusicPlayer):
         "jymaster": "20900kmflac",
     }
     supported_audio_qualities: ClassVar[tuple[str, ...]] = tuple(QUALITY_TO_BITRATE)
+    supports_playlist_import = True
     TRACK_USER_ALPHABET = string.ascii_lowercase + string.digits
     TRACK_USER_LENGTH = 16
     COVER_BASE_URL = "http://img1.kwcdn.kuwo.cn/star/albumcover/"
@@ -140,6 +142,103 @@ class KuwoMusic(BaseMusicPlayer):
             if len(songs) >= limit:
                 break
         return songs
+
+    async def fetch_playlist(self, reference: str, limit: int = 1000) -> Playlist:
+        """Fetch a Kuwo playlist from its public playlist service.
+
+        Args:
+            reference: Numeric playlist ID or a kuwo.cn playlist URL.
+            limit: Maximum number of songs to import.
+
+        Returns:
+            Playlist metadata and normalized Kuwo songs.
+
+        Raises:
+            ValueError: If the reference or limit is invalid.
+            RuntimeError: If Kuwo does not return valid playlist data.
+        """
+        value = reference.strip()
+        playlist_id = value if value.isdigit() else ""
+        if not playlist_id:
+            parsed = urlparse(value)
+            hostname = (parsed.hostname or "").lower()
+            if parsed.scheme not in {"http", "https"} or not (
+                hostname == "kuwo.cn" or hostname.endswith(".kuwo.cn")
+            ):
+                raise ValueError("invalid Kuwo playlist URL")
+            query = parse_qs(parsed.query)
+            playlist_id = query.get("pid", query.get("id", [""]))[0]
+            if not playlist_id:
+                match = re.search(r"/(?:playlist_detail|playlist)/(\d+)", parsed.path)
+                playlist_id = match.group(1) if match else ""
+        if not playlist_id.isdigit():
+            raise ValueError("Kuwo playlist ID must be numeric")
+        if not 1 <= limit <= 1000:
+            raise ValueError("playlist import limit must be between 1 and 1000")
+
+        result = await self._request(
+            f"{self.PLAYLIST_URL}?"
+            f"{urlencode({'op': 'getlistinfo', 'pid': playlist_id, 'pn': 0, 'rn': limit, 'encode': 'utf-8', 'keyset': 'pl2012', 'identity': 'kuwo', 'pcmp4': 1, 'vipver': 1})}"
+        )
+        items = result.get("musiclist") if isinstance(result, dict) else None
+        if (
+            not isinstance(result, dict)
+            or result.get("result") != "ok"
+            or not isinstance(items, list)
+        ):
+            raise RuntimeError("Kuwo playlist service returned invalid data")
+
+        songs: list[Song] = []
+        for item in items[:limit]:
+            if not isinstance(item, dict):
+                continue
+            raw_id = str(
+                item.get("id") or item.get("musicrid") or item.get("MUSICRID") or ""
+            ).strip()
+            match = self.MUSICRID_PATTERN.fullmatch(raw_id)
+            if not match:
+                continue
+            duration = item.get("duration")
+            try:
+                duration_ms = int(float(duration)) * 1000 if duration else None
+            except (TypeError, ValueError):
+                duration_ms = None
+            cover = item.get("albumpic") or item.get("musicPic")
+            if isinstance(cover, str):
+                cover = cover.strip()
+                if cover.startswith("http://"):
+                    cover = f"https://{cover[7:]}"
+            else:
+                cover = None
+            song_id = match.group("id")
+            songs.append(
+                Song(
+                    id=song_id,
+                    source=self.platform.name,
+                    card_type="kuwo",
+                    name=item.get("name") or item.get("FSONGNAME") or "Unknown song",
+                    artists=item.get("artist") or item.get("FARTIST") or "",
+                    duration=duration_ms,
+                    cover_url=cover or None,
+                    page_url=f"https://www.kuwo.cn/play_detail/{song_id}",
+                    note=item.get("album") or item.get("FALBUM") or None,
+                )
+            )
+        if not songs:
+            raise RuntimeError("Kuwo playlist is empty or unavailable")
+
+        cover_url = result.get("pic")
+        if isinstance(cover_url, str) and cover_url.startswith("http://"):
+            cover_url = f"https://{cover_url[7:]}"
+        return Playlist(
+            id=playlist_id,
+            source=self.platform.name,
+            name=str(result.get("title") or f"酷我歌单 {playlist_id}"),
+            songs=songs,
+            cover_url=cover_url if isinstance(cover_url, str) else None,
+            creator=str(result.get("uname")) if result.get("uname") else None,
+            description=str(result.get("info")) if result.get("info") else None,
+        )
 
     async def fetch_extra(self, song: Song) -> Song:
         """Resolve a Kuwo direct audio URL and enrich track metadata.

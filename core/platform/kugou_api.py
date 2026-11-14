@@ -1,10 +1,10 @@
 from typing import Any, ClassVar
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlparse
 
 from astrbot.api import logger
 
 from ..config import PluginConfig
-from ..model import Platform, Song
+from ..model import Platform, Playlist, Song
 from .base import BaseMusicPlayer
 
 
@@ -15,6 +15,7 @@ class KuGouMusicAPI(BaseMusicPlayer):
         name="kugou_api",
         display_name="酷狗音乐API版",
     )
+    supports_playlist_import = True
 
     def __init__(self, config: PluginConfig):
         super().__init__(config)
@@ -94,6 +95,133 @@ class KuGouMusicAPI(BaseMusicPlayer):
                 )
             )
         return songs
+
+    async def fetch_playlist(self, reference: str, limit: int = 1000) -> Playlist:
+        """Fetch a KuGou playlist through the configured KuGouMusicApi.
+
+        Args:
+            reference: Global collection ID or a kugou.com URL containing it.
+            limit: Maximum number of songs to import.
+
+        Returns:
+            Playlist metadata and normalized KuGou songs.
+
+        Raises:
+            ValueError: If the reference or limit is invalid.
+            RuntimeError: If the configured API cannot load the playlist.
+        """
+        value = reference.strip()
+        playlist_id = value if "/" not in value else ""
+        if not playlist_id:
+            parsed = urlparse(value)
+            hostname = (parsed.hostname or "").lower()
+            if parsed.scheme not in {"http", "https"} or not (
+                hostname == "kugou.com" or hostname.endswith(".kugou.com")
+            ):
+                raise ValueError("invalid KuGou playlist URL")
+            query = parse_qs(parsed.query)
+            playlist_id = query.get("global_collection_id", query.get("id", [""]))[0]
+        if (
+            not playlist_id
+            or len(playlist_id) > 128
+            or not all(
+                character.isalnum() or character in "_-" for character in playlist_id
+            )
+        ):
+            raise ValueError("invalid KuGou global collection ID")
+        if not 1 <= limit <= 1000:
+            raise ValueError("playlist import limit must be between 1 and 1000")
+
+        detail_result = await self._request_api(
+            "/playlist/detail", {"ids": playlist_id}
+        )
+        detail_body = (
+            detail_result.get("data", detail_result)
+            if isinstance(detail_result, dict)
+            else None
+        )
+        if isinstance(detail_body, dict):
+            metadata_items = (
+                detail_body.get("data")
+                or detail_body.get("info")
+                or detail_body.get("lists")
+                or []
+            )
+        else:
+            metadata_items = detail_body
+        metadata = (
+            metadata_items[0]
+            if isinstance(metadata_items, list)
+            and metadata_items
+            and isinstance(metadata_items[0], dict)
+            else {}
+        )
+
+        result = await self._request_api(
+            "/playlist/track/all",
+            {"id": playlist_id, "page": 1, "pagesize": limit},
+        )
+        body = result.get("data", result) if isinstance(result, dict) else None
+        items = (
+            body.get("info") or body.get("lists") or body.get("songs") or []
+            if isinstance(body, dict)
+            else []
+        )
+        songs: list[Song] = []
+        for item in items[:limit]:
+            if not isinstance(item, dict):
+                continue
+            song_hash = str(item.get("hash") or item.get("FileHash") or "")
+            if not song_hash:
+                continue
+            cover = item.get("image") or item.get("Image") or item.get("img")
+            if isinstance(cover, str):
+                cover = cover.replace("{size}", "400")
+                if cover.startswith("//"):
+                    cover = f"https:{cover}"
+            duration = item.get("duration") or item.get("Duration")
+            album_id = item.get("album_id") or item.get("AlbumID")
+            album_audio_id = (
+                item.get("album_audio_id")
+                or item.get("mixsongid")
+                or item.get("MixSongID")
+            )
+            songs.append(
+                Song(
+                    id=song_hash,
+                    source=self.platform.name,
+                    card_type="kugou",
+                    name=item.get("songname")
+                    or item.get("SongName")
+                    or item.get("filename")
+                    or item.get("FileName"),
+                    artists=item.get("singername") or item.get("SingerName"),
+                    duration=int(duration) * 1000 if duration else None,
+                    cover_url=cover if isinstance(cover, str) else None,
+                    page_url=f"https://www.kugou.com/song/#hash={quote(song_hash)}",
+                    note=item.get("album_name") or item.get("AlbumName"),
+                    album_id=int(album_id) if album_id else None,
+                    album_audio_id=int(album_audio_id) if album_audio_id else None,
+                )
+            )
+        if not songs:
+            raise RuntimeError("KuGou playlist is empty or unavailable")
+        return Playlist(
+            id=playlist_id,
+            source=self.platform.name,
+            name=str(
+                metadata.get("specialname")
+                or metadata.get("name")
+                or metadata.get("title")
+                or f"酷狗歌单 {playlist_id}"
+            ),
+            songs=songs,
+            cover_url=metadata.get("img")
+            or metadata.get("image")
+            or metadata.get("pic"),
+            creator=metadata.get("nickname") or metadata.get("username"),
+            description=metadata.get("intro") or metadata.get("description"),
+        )
 
     async def fetch_extra(self, song: Song) -> Song:
         """Resolve audio URL and cover details for a selected song.

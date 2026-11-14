@@ -1,11 +1,12 @@
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, fields
+from urllib.parse import urlparse
 
 from astrbot.api import logger
 
 from .config import PluginConfig
-from .model import Song
+from .model import Playlist, Song
 from .music_store import MusicStore
 from .platform import BaseMusicPlayer
 from .platform.kugou.kugou_login import KuGouLogin
@@ -121,6 +122,72 @@ class MusicService:
             ),
             None,
         )
+
+    async def fetch_playlist(
+        self, reference: str, platform: str = "", limit: int = 1000
+    ) -> tuple[BaseMusicPlayer, Playlist]:
+        """Fetch a playlist from an enabled source.
+
+        Args:
+            reference: Playlist share URL or platform playlist ID.
+            platform: Optional adapter identifier for ambiguous bare IDs.
+            limit: Maximum number of songs to fetch.
+
+        Returns:
+            Adapter selected for replay and the normalized playlist.
+
+        Raises:
+            ValueError: If the source cannot be detected or is unavailable.
+            NotImplementedError: If the selected source cannot import playlists.
+            RuntimeError: If all matching adapters fail to fetch the playlist.
+        """
+        reference = reference.strip()
+        platform = platform.strip().lower()
+        if not reference:
+            raise ValueError("playlist reference must not be empty")
+        if platform:
+            player = self.get_player(platform)
+            if player is None:
+                raise ValueError(f"Music source is unavailable: {platform}")
+            if not player.supports_playlist_import:
+                raise NotImplementedError(
+                    f"{player.platform.display_name} does not support playlist import"
+                )
+            return player, await player.fetch_playlist(reference, limit)
+
+        detected: set[str] = set()
+        if reference.startswith(("http://", "https://")):
+            hostname = (urlparse(reference).hostname or "").lower()
+            if hostname in {"music.163.com", "m.music.163.com"}:
+                detected = {"netease", "netease_api"}
+            elif hostname == "y.qq.com" or hostname.endswith(".y.qq.com"):
+                detected = {"qqmusic"}
+            elif hostname == "kugou.com" or hostname.endswith(".kugou.com"):
+                detected = {"kugou", "kugou_api"}
+            elif hostname == "kuwo.cn" or hostname.endswith(".kuwo.cn"):
+                detected = {"kuwo"}
+        if not detected:
+            raise ValueError(
+                "could not detect the playlist source; specify a platform for bare IDs"
+            )
+
+        candidates = [
+            player
+            for player in self.get_players_by_priority()
+            if player.platform.name in detected and player.supports_playlist_import
+        ]
+        if not candidates:
+            raise ValueError("no enabled source can import this playlist URL")
+        last_error: Exception | None = None
+        for player in candidates:
+            try:
+                return player, await player.fetch_playlist(reference, limit)
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    f"Playlist import via {player.platform.name} failed: {exc}"
+                )
+        raise RuntimeError(str(last_error or "playlist import failed"))
 
     async def resolve_song(self, player: BaseMusicPlayer, song: Song) -> Song:
         """Resolve replay metadata without switching song identity or source.

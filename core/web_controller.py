@@ -39,6 +39,12 @@ class WebController:
             ),
             ("/playlists", self.list_playlists, ["GET"], "List playlists"),
             ("/playlists", self.create_playlist, ["POST"], "Create a playlist"),
+            (
+                "/playlists/import",
+                self.import_playlist,
+                ["POST"],
+                "Import a remote playlist",
+            ),
             ("/playlists/<playlist_id>", self.get_playlist, ["GET"], "Get a playlist"),
             (
                 "/playlists/<playlist_id>/rename",
@@ -292,6 +298,7 @@ class WebController:
                     {
                         "name": player.platform.name,
                         "display_name": player.platform.display_name,
+                        "supports_playlist_import": player.supports_playlist_import,
                     }
                     for player in self.music_service.get_players_by_priority()
                 ]
@@ -422,7 +429,7 @@ class WebController:
             "player": request.query.get("player"),
             "source": request.query.get("source"),
         }
-        entries = await self.store.list_history(limit=limit, offset=offset, **filters)
+        entries = await self.store.list_history(limit=limit, offset=offset, **filters) # type: ignore
         return json_response(
             {
                 "items": await self._serialize_entries(entries),
@@ -503,6 +510,43 @@ class WebController:
         playlist_id = await self.store.create_playlist(name)
         return json_response(
             await self.store.get_playlist(playlist_id), status_code=201
+        )
+
+    async def import_playlist(self):
+        """Fetch a remote playlist and save it atomically as a local playlist."""
+        payload = await request.json(default={})
+        reference = payload.get("reference") if isinstance(payload, dict) else None
+        platform = payload.get("platform", "") if isinstance(payload, dict) else ""
+        if (
+            not isinstance(reference, str)
+            or not reference.strip()
+            or len(reference) > 2000
+        ):
+            return error_response("reference must contain 1 to 2000 characters")
+        if not isinstance(platform, str) or len(platform) > 100:
+            return error_response("platform must be a string of at most 100 characters")
+        try:
+            player, remote = await self.music_service.fetch_playlist(
+                reference, platform=platform, limit=1000
+            )
+            name = remote.name.strip()[:200] or f"Imported playlist {remote.id}"
+            playlist_id, imported, duplicates = await self.store.import_playlist(
+                name, player.platform.name, remote.songs
+            )
+            playlist = await self.store.get_playlist(playlist_id)
+        except (ValueError, NotImplementedError) as exc:
+            return error_response(str(exc))
+        except RuntimeError as exc:
+            return error_response(str(exc), status_code=502)
+        return json_response(
+            {
+                "playlist": playlist,
+                "source": player.platform.name,
+                "source_playlist_id": remote.id,
+                "imported": imported,
+                "duplicates": duplicates,
+            },
+            status_code=201,
         )
 
     async def get_playlist(self, playlist_id: str):
