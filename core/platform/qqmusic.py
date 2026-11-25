@@ -81,16 +81,22 @@ class QQMusic(BaseMusicPlayer):
             return cookie
         return ""
 
-    async def download_cover(self, url: str) -> bytes | None:
+    async def download_cover(
+        self, url: str, *, headers: dict[str, str] | None = None
+    ) -> bytes | None:
         """Download a QQ Music cover with urllib.
 
         Args:
             url: Cover image URL.
+            headers: Optional header override.
 
         Returns:
             Image bytes, or None if the request fails.
         """
-        request = urllib.request.Request(url, headers=self.DOWNLOAD_HEADERS)
+        request_headers = (
+            {**self.DOWNLOAD_HEADERS, **headers} if headers else self.DOWNLOAD_HEADERS
+        )
+        request = urllib.request.Request(url, headers=request_headers)
         proxy = self.platform_cfg.proxy or None
         proxy_handler = {"http": proxy, "https": proxy} if proxy else {}
         opener = urllib.request.build_opener(urllib.request.ProxyHandler(proxy_handler))

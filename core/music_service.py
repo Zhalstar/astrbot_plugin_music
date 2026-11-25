@@ -1,7 +1,10 @@
+import asyncio
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, fields
 from urllib.parse import urlparse
+
+import aiohttp
 
 from astrbot.api import logger
 
@@ -9,8 +12,8 @@ from .config import PluginConfig
 from .model import Playlist, Song
 from .music_store import MusicStore
 from .platform import BaseMusicPlayer
-from .platform.kugou.kugou_login import KuGouLogin
-from .platform.qqmusic.qqmusic_login import QQMusicLogin
+
+_PER_SOURCE_SEARCH_TIMEOUT = 12.0
 
 
 @dataclass(slots=True)
@@ -42,8 +45,37 @@ class MusicService:
         self.cfg = config
         self.store = MusicStore(config.db_path)
         self.players: list[BaseMusicPlayer] = []
-        self.qqmusic_login = QQMusicLogin(config)
-        self.kugou_login = KuGouLogin(config)
+        self._http_session: aiohttp.ClientSession | None = None
+        self._closing = False
+        self._qqmusic_login = None
+        self._kugou_login = None
+
+    def get_http_session(self) -> aiohttp.ClientSession:
+        """Lazily create the single shared HTTP session for adapters and ArkCard."""
+        if self._closing:
+            raise RuntimeError("MusicService is closing; cannot create HTTP session")
+        if self._http_session is None or self._http_session.closed:
+            self._http_session = aiohttp.ClientSession(
+                cookie_jar=aiohttp.DummyCookieJar(),
+                timeout=aiohttp.ClientTimeout(total=30, connect=10),
+            )
+        return self._http_session
+
+    @property
+    def qqmusic_login(self):
+        if self._qqmusic_login is None:
+            from .platform.qqmusic.qqmusic_login import QQMusicLogin
+
+            self._qqmusic_login = QQMusicLogin(self.cfg)
+        return self._qqmusic_login
+
+    @property
+    def kugou_login(self):
+        if self._kugou_login is None:
+            from .platform.kugou.kugou_login import KuGouLogin
+
+            self._kugou_login = KuGouLogin(self.cfg)
+        return self._kugou_login
 
     async def initialize(self) -> None:
         """Instantiate enabled sources once and clean up partial initialization.
@@ -51,24 +83,33 @@ class MusicService:
         Raises:
             Exception: If a source cannot be initialized.
         """
+        self._closing = False
         await self.store.initialize()
+        await asyncio.to_thread(
+            BaseMusicPlayer.cleanup_stale_temp_files, self.cfg.temp_dir
+        )
         if self.players:
             return
         enabled_platforms = set(self.cfg.players.enabled_platforms())
         try:
             for player_class in BaseMusicPlayer.get_all_subclass():
                 if player_class.platform.name in enabled_platforms:
-                    self.players.append(player_class(self.cfg))
+                    player = player_class(self.cfg)
+                    player.set_session_factory(self.get_http_session)
+                    self.players.append(player)
         except Exception:
             await self.close()
             raise
 
     async def close(self) -> None:
         """Cancel login sessions and close sources, continuing after failures."""
+        self._closing = True
         for name, login in (
-            ("qqmusic", self.qqmusic_login),
-            ("kugou", self.kugou_login),
+            ("qqmusic", self._qqmusic_login),
+            ("kugou", self._kugou_login),
         ):
+            if login is None:
+                continue
             try:
                 await login.close()
             except Exception:
@@ -79,6 +120,11 @@ class MusicService:
             except Exception:
                 logger.exception(f"Failed to close music source {player.platform.name}")
         self.players.clear()
+        while self._http_session is not None:
+            session = self._http_session
+            self._http_session = None
+            if not session.closed:
+                await session.close()
 
     async def start_login(
         self,
@@ -351,15 +397,30 @@ class MusicService:
         result = SearchResult()
         players = self.get_players_by_priority(platform, fallback=fallback)
         selected_player = self.get_player(platform) if platform else None
+        per_source_timeout = min(
+            _PER_SOURCE_SEARCH_TIMEOUT,
+            max(1.0, float(self.cfg.search_config.timeout)),
+        )
         for player in players:
             result.attempted_sources.append(player.platform.display_name)
             logger.debug(f"Searching {query} with {player.platform.display_name}")
             try:
-                songs = await player.fetch_songs(
-                    keyword=query,
-                    limit=self.cfg.search_config.song_limit if limit is None else limit,
-                    extra=sub_source if player is selected_player else None,
+                songs = await asyncio.wait_for(
+                    player.fetch_songs(
+                        keyword=query,
+                        limit=self.cfg.search_config.song_limit
+                        if limit is None
+                        else limit,
+                        extra=sub_source if player is selected_player else None,
+                    ),
+                    timeout=per_source_timeout,
                 )
+            except (TimeoutError, asyncio.TimeoutError):
+                logger.warning(
+                    f"Search via {player.platform.display_name} timed out "
+                    f"after {per_source_timeout:.0f}s"
+                )
+                continue
             except Exception as exc:
                 logger.warning(
                     f"Search via {player.platform.display_name} failed: {exc}"

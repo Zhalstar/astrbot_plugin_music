@@ -209,7 +209,7 @@ class PluginConfig(ConfigNode):
         self.plugin_dir = Path(get_astrbot_plugin_path()) / self._plugin_name
         self.default_template_file = self.plugin_dir / "default_template.json"
         self.font_path = self.plugin_dir / "fonts" / "simhei.ttf"
-        self.temp_dir = Path(get_astrbot_temp_path())
+        self.temp_dir = Path(get_astrbot_temp_path()) / self._plugin_name
         self.data_dir = Path(get_astrbot_plugin_data_path()) / self._plugin_name
         self.db_path = self.data_dir / "music.db"
 

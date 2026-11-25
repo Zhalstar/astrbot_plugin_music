@@ -1,4 +1,6 @@
+import asyncio
 import json
+from collections.abc import Callable
 from typing import Any
 
 import aiohttp
@@ -18,14 +20,31 @@ class ArkCard:
     SUPPORTED_CARD_TYPES = {"qq", "163", "kugou", "bilibili"}
     REQUIRED_FIELDS = {"app", "meta", "prompt", "view"}
 
-    def __init__(self, config: PluginConfig):
+    def __init__(
+        self,
+        config: PluginConfig,
+        session_factory: Callable[[], aiohttp.ClientSession] | None = None,
+    ):
         self.key = config.send_config.ark_key
-        self.session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=config.search_config.timeout)
-        )
+        self._timeout = config.search_config.timeout
+        self._session_factory = session_factory
+        self.session: aiohttp.ClientSession | None = None
+
+    def _get_session(self) -> aiohttp.ClientSession:
+        """Return the shared HTTP session or lazily create a local fallback."""
+        if self._session_factory is not None:
+            return self._session_factory()
+        if self.session is None or self.session.closed:
+            self.session = aiohttp.ClientSession(
+                cookie_jar=aiohttp.DummyCookieJar(),
+                timeout=aiohttp.ClientTimeout(total=self._timeout),
+            )
+        return self.session
 
     async def close(self) -> None:
-        await self.session.close()
+        if self.session is not None and not self.session.closed:
+            await self.session.close()
+        self.session = None
 
     async def _resolve_cover_url(self, cover_url: str, proxy: str | None) -> str:
         """Resolve a cover URL to its final HTTP redirect target.
@@ -38,12 +57,15 @@ class ArkCard:
             The final redirected URL, or the original URL when resolution fails.
         """
         try:
-            async with self.session.get(
-                cover_url, allow_redirects=True, proxy=proxy or None
+            async with self._get_session().get(
+                cover_url,
+                allow_redirects=True,
+                proxy=proxy or None,
+                timeout=aiohttp.ClientTimeout(total=self._timeout),
             ) as cover_response:
                 cover_response.raise_for_status()
                 return str(cover_response.url)
-        except (aiohttp.ClientError, TimeoutError) as exc:
+        except (aiohttp.ClientError, TimeoutError, asyncio.TimeoutError) as exc:
             logger.warning(
                 f"Ark card cover redirect failed ({type(exc).__name__}); "
                 "using the original URL"
@@ -89,12 +111,20 @@ class ArkCard:
             "format": card_format,
         }
         try:
-            async with self.session.get(
-                self.API_URL, params=params, proxy=proxy or None
+            async with self._get_session().get(
+                self.API_URL,
+                params=params,
+                proxy=proxy or None,
+                timeout=aiohttp.ClientTimeout(total=self._timeout),
             ) as response:
                 response.raise_for_status()
                 result = await response.json(content_type=None)
-        except (aiohttp.ClientError, TimeoutError, json.JSONDecodeError) as exc:
+        except (
+            aiohttp.ClientError,
+            TimeoutError,
+            asyncio.TimeoutError,
+            json.JSONDecodeError,
+        ) as exc:
             logger.warning(f"Ark card request failed: {type(exc).__name__}")
             return None
 

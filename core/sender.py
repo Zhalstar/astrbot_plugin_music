@@ -3,23 +3,13 @@ import base64
 import json
 import random
 import re
+import time
 import uuid
+from collections.abc import Callable
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import botpy.message
-from botpy.http import Route
-from botpy.interaction import Interaction
-from botpy.types.inline import (
-    Action,
-    Button,
-    Keyboard,
-    KeyboardRow,
-    Permission,
-    RenderData,
-)
-from botpy.types.message import KeyboardPayload, MarkdownPayload
 from PIL import Image as PILImage
 
 from astrbot.api import logger
@@ -60,6 +50,14 @@ def clean_comment_text(content: str) -> str:
     return re.sub(r"\[[^\]]*]", "", content).replace("\\n", "\n").strip()
 
 
+if TYPE_CHECKING:
+    from botpy.interaction import Interaction
+
+_SELECTION_TTL_SECONDS = 600.0
+_MAX_SELECTION_ENTRIES = 256
+_COVER_CONCURRENCY = 5
+
+
 class MusicSender:
     def __init__(
         self,
@@ -83,15 +81,33 @@ class MusicSender:
         self.lyrics_renderer = lyrics_renderer
         self.song_renderer = song_renderer
         self.music_service = music_service
-        self.ark_card = ArkCard(config)
+        session_factory = (
+            music_service.get_http_session
+            if isinstance(music_service, MusicService)
+            else None
+        )
+        self.ark_card = ArkCard(config, session_factory=session_factory)
         self._selection_message_ids: dict[str, str | int] = {}
+        self._selection_message_timestamps: dict[str, float] = {}
         self._selection_contexts: dict[str, dict[str, Any]] = {}
         self._selection_context_ids: dict[str, str] = {}
         self._interaction_clients: set[int] = set()
 
     async def close(self) -> None:
         """Release resources owned by the sender."""
+        self._selection_message_ids.clear()
+        self._selection_message_timestamps.clear()
+        self._selection_contexts.clear()
+        self._selection_context_ids.clear()
         await self.ark_card.close()
+
+    def _unlink_temp_audio(self, file_path: Path) -> None:
+        """Delete a failed download only if it resides in the plugin temp directory."""
+        try:
+            if file_path.parent.resolve() == self.cfg.temp_dir.resolve():
+                file_path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.debug(f"Failed to remove temp audio file {file_path}: {exc}")
 
     def set_interaction_create(self):
         """Register interaction intents and handlers for current QQ clients."""
@@ -114,7 +130,7 @@ class MusicSender:
             previous_handler = getattr(client, "on_interaction_create", None)
 
             async def on_interaction_create(
-                interaction: Interaction,
+                interaction: "Interaction",
                 previous_handler=previous_handler,
             ):
                 if await self.handle_interaction(interaction):
@@ -141,6 +157,9 @@ class MusicSender:
     async def _recall_qqofficial_message(
         self, event: QQOfficialMessageEvent, message_id: str
     ) -> None:
+        import botpy.message
+        from botpy.http import Route
+
         source = event.message_obj.raw_message
         route_path = None
         route_params = {}
@@ -175,6 +194,59 @@ class MusicSender:
     def _make_selection_key(event: AstrMessageEvent) -> str:
         return f"{event.unified_msg_origin}:{event.get_sender_id()}"
 
+    @staticmethod
+    def _prune_ttl_entries(
+        entries: dict[str, Any],
+        get_ts: Callable[[str, Any], float],
+        now: float,
+    ) -> list[str]:
+        """Evict expired or excess entries in insertion order and return removed keys."""
+        removed = [
+            key
+            for key, value in entries.items()
+            if now - get_ts(key, value) >= _SELECTION_TTL_SECONDS
+        ]
+        for key in removed:
+            entries.pop(key, None)
+        while len(entries) > _MAX_SELECTION_ENTRIES:
+            oldest_key = next(iter(entries))
+            entries.pop(oldest_key, None)
+            removed.append(oldest_key)
+        return removed
+
+    def _prune_selection_state(self, now: float | None = None) -> None:
+        """Evict expired or excess selection contexts and message IDs."""
+        current = time.monotonic() if now is None else now
+        self._prune_ttl_entries(
+            self._selection_contexts,
+            lambda _k, ctx: float(ctx.get("created_at", current)),
+            current,
+        )
+        stale_keys = [
+            key
+            for key, sel_id in self._selection_context_ids.items()
+            if sel_id not in self._selection_contexts
+        ]
+        for key in stale_keys:
+            self._selection_context_ids.pop(key, None)
+
+        removed_msg_keys = self._prune_ttl_entries(
+            self._selection_message_ids,
+            lambda key, _val: self._selection_message_timestamps.get(key, current),
+            current,
+        )
+        for key in removed_msg_keys:
+            self._selection_message_timestamps.pop(key, None)
+
+    def _record_selection_message(
+        self, event: AstrMessageEvent, message_id: str | int
+    ) -> None:
+        now = time.monotonic()
+        self._prune_selection_state(now)
+        key = self._make_selection_key(event)
+        self._selection_message_ids[key] = message_id
+        self._selection_message_timestamps[key] = now
+
     def clear_selection_context(self, event: AstrMessageEvent) -> None:
         """Remove the active selection context for an event.
 
@@ -188,6 +260,7 @@ class MusicSender:
 
     async def _recall_selection_message(self, event: AstrMessageEvent) -> None:
         key = self._make_selection_key(event)
+        self._selection_message_timestamps.pop(key, None)
         message_id = self._selection_message_ids.pop(key, None)
         if message_id is None:
             return
@@ -205,6 +278,7 @@ class MusicSender:
         if not getattr(resolved, "button_id", "").startswith("music_song_selection_"):
             return False
 
+        self._prune_selection_state()
         button_data = getattr(resolved, "button_data", "") or ""
         try:
             payload = json.loads(button_data)
@@ -245,10 +319,20 @@ class MusicSender:
         )
         return True
 
+    @staticmethod
+    def _decode_cover(
+        data: bytes, target_size: tuple[int, int]
+    ) -> PILImage.Image:
+        with PILImage.open(BytesIO(data)) as raw_image:
+            image = raw_image.convert("RGB")
+            if image.size != target_size:
+                image = image.resize(target_size)
+            return image
+
     async def _build_cover_map(
         self, player: BaseMusicPlayer, cover_urls: list[str]
     ) -> dict[str, PILImage.Image]:
-        """Download and decode candidate covers using their source adapter.
+        """Download and decode candidate covers concurrently using their source adapter.
 
         Args:
             player: Adapter responsible for downloading the covers.
@@ -257,17 +341,34 @@ class MusicSender:
         Returns:
             Successfully decoded covers keyed by their original URL.
         """
-        cover_map: dict[str, PILImage.Image] = {}
-        for cover_url in dict.fromkeys(cover_urls):
-            try:
-                data = await player.download_cover(cover_url)
-                if not data:
-                    continue
-                image = PILImage.open(BytesIO(data)).convert("RGB")
-                cover_map[cover_url] = image
-            except Exception as e:
-                logger.warning(f"封面下载失败: {cover_url}, {e}")
-        return cover_map
+        unique_urls = list(dict.fromkeys(url for url in cover_urls if url))
+        if not unique_urls:
+            return {}
+
+        theme = self.song_renderer.theme
+        target_size = (theme.card_width, theme.thumb_height)
+        semaphore = asyncio.Semaphore(_COVER_CONCURRENCY)
+
+        async def _fetch_and_decode(
+            cover_url: str,
+        ) -> tuple[str, PILImage.Image | None]:
+            async with semaphore:
+                try:
+                    data = await player.download_cover(cover_url)
+                    if not data:
+                        return cover_url, None
+                    image = await asyncio.to_thread(
+                        self._decode_cover, data, target_size
+                    )
+                    return cover_url, image
+                except Exception as e:
+                    logger.warning(f"封面下载失败: {cover_url}, {e}")
+                    return cover_url, None
+
+        results = await asyncio.gather(
+            *(_fetch_and_decode(url) for url in unique_urls)
+        )
+        return {url: image for url, image in results if image is not None}
 
     @staticmethod
     async def send_msg(event: AiocqhttpMessageEvent, payloads: dict) -> int | None:
@@ -306,7 +407,7 @@ class MusicSender:
             await event.send(event.plain_result(text))
 
         if message_id is not None:
-            self._selection_message_ids[self._make_selection_key(event)] = message_id
+            self._record_selection_message(event, message_id)
 
     async def _send_song_selection_text(
         self,
@@ -326,16 +427,35 @@ class MusicSender:
         songs: list[Song],
         player: BaseMusicPlayer,
     ) -> str | None:
+        import botpy.message
+        from botpy.types.inline import (
+            Action,
+            Button,
+            Keyboard,
+            KeyboardRow,
+            Permission,
+            RenderData,
+        )
+        from botpy.types.message import KeyboardPayload, MarkdownPayload
+
         self.set_interaction_create()
+        now = time.monotonic()
+        self._prune_selection_state(now)
+        selection_key = self._make_selection_key(event)
+        previous_id = self._selection_context_ids.pop(selection_key, None)
+        if previous_id:
+            self._selection_contexts.pop(previous_id, None)
+
         selection_id = uuid.uuid4().hex
         selection_context = {
             "event": event,
             "songs": songs,
             "player": player,
             "handled": False,
+            "created_at": now,
         }
         self._selection_contexts[selection_id] = selection_context
-        self._selection_context_ids[self._make_selection_key(event)] = selection_id
+        self._selection_context_ids[selection_key] = selection_id
 
         buttons = []
         for index, song in enumerate(songs, 1):
@@ -416,8 +536,7 @@ class MusicSender:
         )
         if message_id is None:
             raise RuntimeError("QQ API response has no message ID")
-        key = self._make_selection_key(event)
-        self._selection_message_ids[key] = message_id
+        self._record_selection_message(event, message_id)
         return str(message_id)
 
     async def _send_song_selection_image(
@@ -426,14 +545,32 @@ class MusicSender:
         songs: list[Song],
         player: BaseMusicPlayer | None = None,
     ) -> str | int | None:
-        song_items = []
-        cover_urls: list[str] = []
-        for song in songs:
-            if player and (not song.cover_url or not song.audio_url):
-                song = await player.fetch_extra(song)
-            song_items.append(song)
-            if song.cover_url:
-                cover_urls.append(song.cover_url)
+        song_items = list(songs)
+        if player is not None:
+            missing_cover_indices = [
+                idx for idx, song in enumerate(song_items) if not song.cover_url
+            ]
+            if missing_cover_indices:
+                semaphore = asyncio.Semaphore(_COVER_CONCURRENCY)
+
+                async def _fetch_cover_meta(idx: int) -> tuple[int, Song]:
+                    original = song_items[idx]
+                    async with semaphore:
+                        try:
+                            return idx, await player.fetch_extra(original)
+                        except Exception as exc:
+                            logger.warning(
+                                f"获取候选歌曲封面失败: {original.name}, {exc}"
+                            )
+                            return idx, original
+
+                fetched = await asyncio.gather(
+                    *(_fetch_cover_meta(idx) for idx in missing_cover_indices)
+                )
+                for idx, enriched in fetched:
+                    song_items[idx] = enriched
+
+        cover_urls = [song.cover_url for song in song_items if song.cover_url]
 
         cover_map = await self._build_cover_map(player, cover_urls) if player else {}
         image_bytes = await self.song_renderer.render_song_list_image(
@@ -470,8 +607,7 @@ class MusicSender:
             message_id = None
 
         if message_id is not None:
-            key = self._make_selection_key(event)
-            self._selection_message_ids[key] = message_id
+            self._record_selection_message(event, message_id)
         return message_id
 
     async def send_song_selection(
@@ -657,7 +793,9 @@ class MusicSender:
             logger.error(f"【{song.name}】歌词获取失败")
             return False
         try:
-            image = self.lyrics_renderer.draw_lyrics(song.lyrics)
+            image = await asyncio.to_thread(
+                self.lyrics_renderer.draw_lyrics, song.lyrics
+            )
             await event.send(MessageChain(chain=[Image.fromBytes(image)]))
             return True
         except Exception as e:
@@ -731,18 +869,21 @@ class MusicSender:
                 logger.debug(f"{mode} 不支持，跳过")
                 continue
 
+            downloaded_temp_path: Path | None = None
             try:
                 if mode == "record_link":
                     ok = bool(song.audio_url) and await self._send_record_link(
                         event, song.audio_url
                     )
                 elif mode == "record_local":
-                    file_path = await player.download_audio(song, quality="standard")
-                    if not file_path:
+                    downloaded_temp_path = await player.download_audio(
+                        song, quality="standard"
+                    )
+                    if not downloaded_temp_path:
                         logger.error(f"【{song.name}】下载失败")
                         ok = False
                     else:
-                        ok = await self._send_record_local(event, file_path)
+                        ok = await self._send_record_local(event, downloaded_temp_path)
                 elif mode == "file_link":
                     ok = bool(song.audio_url) and await self._send_file_link(
                         event,
@@ -750,17 +891,17 @@ class MusicSender:
                         f"{song.name}_{song.artists}.mp3",
                     )
                 elif mode == "file_local":
-                    file_path = await player.download_audio(
+                    downloaded_temp_path = await player.download_audio(
                         song, quality=getattr(player.platform_cfg, "quality", None)
                     )
-                    if not file_path:
+                    if not downloaded_temp_path:
                         logger.error(f"【{song.name}】下载失败")
                         ok = False
                     else:
                         ok = await self._send_file_local(
                             event,
-                            file_path,
-                            f"{song.name}_{song.artists}{file_path.suffix}",
+                            downloaded_temp_path,
+                            f"{song.name}_{song.artists}{downloaded_temp_path.suffix}",
                         )
                 elif mode == "text":
                     ok = bool(song.audio_url) and await self._send_text(
@@ -770,10 +911,17 @@ class MusicSender:
                     sender = self._get_sender(mode)
                     if not sender:
                         continue
-                    ok = await sender(event, player, song) # type: ignore
+                    ok = await sender(event, player, song)  # type: ignore
+            except asyncio.CancelledError:
+                if downloaded_temp_path is not None:
+                    self._unlink_temp_audio(downloaded_temp_path)
+                raise
             except Exception as e:
                 logger.error(f"{mode} 发送异常: {e}")
                 ok = False
+
+            if not ok and downloaded_temp_path is not None:
+                self._unlink_temp_audio(downloaded_temp_path)
 
             if ok:
                 logger.debug(f"{mode} 发送成功")

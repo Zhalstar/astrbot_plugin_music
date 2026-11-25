@@ -200,6 +200,7 @@ class MusicPlugin(Star):
             arg_lower = arg.lower()
             waiter_command = arg_lower.partition(" ")[0]
             if waiter_command == "点歌" or waiter_command in self.trigger_routes:
+                self.sender.clear_selection_context(event)
                 controller.stop()
                 return
             # 解析输入格式
@@ -210,6 +211,7 @@ class MusicPlugin(Star):
             if index == 0:
                 return
             if index < 1 or index > len(songs):
+                self.sender.clear_selection_context(event)
                 controller.stop()
                 return
             selected_song = songs[index - 1]
@@ -224,6 +226,7 @@ class MusicPlugin(Star):
             self.sender.clear_selection_context(event)
             yield event.plain_result("点歌超时！")
         except Exception as e:
+            self.sender.clear_selection_context(event)
             logger.error(traceback.format_exc())
             logger.error("点歌发生错误" + str(e))
 

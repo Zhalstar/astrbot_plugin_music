@@ -1,14 +1,12 @@
 import asyncio
-import gzip
 import json
 import re
 import urllib.parse
-import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any, ClassVar
 
-import aiofiles
+import aiohttp
 
 from astrbot.api import logger
 
@@ -61,11 +59,6 @@ class QQMusic(BaseMusicPlayer):
 
     def __init__(self, config: PluginConfig):
         super().__init__(config)
-        proxy = self.platform_cfg.proxy or None
-        proxy_handler = {"http": proxy, "https": proxy} if proxy else {}
-        self._opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler(proxy_handler)
-        )
 
     @staticmethod
     def hash33(value: str, seed: int = 5381) -> int:
@@ -99,28 +92,19 @@ class QQMusic(BaseMusicPlayer):
             return cookie
         return ""
 
-    async def download_cover(self, url: str) -> bytes | None:
-        """Download a QQ Music cover with urllib.
+    async def download_cover(
+        self, url: str, *, headers: dict[str, str] | None = None
+    ) -> bytes | None:
+        """Download a QQ Music cover via the shared HTTP session.
 
         Args:
             url: Cover image URL.
+            headers: Optional header override.
 
         Returns:
             Image bytes, or None if the request fails.
         """
-        request = urllib.request.Request(url, headers=self.HEADERS)
-        try:
-            response = await asyncio.to_thread(self._opener.open, request, timeout=20)
-            try:
-                if response.status != 200:
-                    logger.warning(f"QQ Music cover returned HTTP {response.status}")
-                    return None
-                return await asyncio.to_thread(response.read)
-            finally:
-                response.close()
-        except Exception as exc:
-            logger.warning(f"QQ Music cover download failed: {exc}")
-            return None
+        return await super().download_cover(url, headers=headers or self.HEADERS)
 
     async def download_audio(
         self, song: Song, quality: str | None = None
@@ -144,29 +128,11 @@ class QQMusic(BaseMusicPlayer):
             await self._resolve_audio(song, requested_quality)
         if not song.audio_url:
             return None
-        self.cfg.temp_dir.mkdir(parents=True, exist_ok=True)
-        suffix = Path(urllib.parse.urlparse(song.audio_url).path).suffix.lower()
-        if suffix not in {".mp3", ".flac", ".m4a", ".aac"}:
-            suffix = ".mp3"
-        file_path = self.cfg.temp_dir / f"{uuid.uuid4().hex}{suffix}"
-        request = urllib.request.Request(song.audio_url, headers=self.HEADERS)
-        try:
-            response = await asyncio.to_thread(self._opener.open, request, timeout=30)
-            try:
-                if response.status != 200:
-                    logger.warning(f"QQ Music audio returned HTTP {response.status}")
-                    return None
-                async with aiofiles.open(file_path, "wb") as file:
-                    while chunk := await asyncio.to_thread(response.read, 64 * 1024):
-                        await file.write(chunk)
-            finally:
-                response.close()
-            logger.debug(f"QQ Music audio downloaded to: {file_path}")
-            return file_path
-        except Exception as exc:
-            file_path.unlink(missing_ok=True)
-            logger.error(f"QQ Music audio download failed: {exc}")
-            return None
+        return await self._download_to_temp(
+            song.audio_url,
+            headers=self.HEADERS,
+            allowed_suffixes=frozenset({".mp3", ".flac", ".m4a", ".aac"}),
+        )
 
     @staticmethod
     def _get_response_song_list(data: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -227,7 +193,7 @@ class QQMusic(BaseMusicPlayer):
         *,
         cookie: str = "",
     ) -> dict[str, Any] | None:
-        """Request a QQ Music JSON endpoint through the configured proxy.
+        """Request a QQ Music JSON endpoint through the shared HTTP session.
 
         Args:
             url: Endpoint URL.
@@ -240,18 +206,18 @@ class QQMusic(BaseMusicPlayer):
         headers = dict(self.HEADERS)
         if cookie:
             headers["Cookie"] = cookie
-        request = urllib.request.Request(
-            f"{url}?{urllib.parse.urlencode(params)}", headers=headers
-        )
         try:
-            response = await asyncio.to_thread(self._opener.open, request, timeout=15)
-            try:
+            async with self._get_session().get(
+                url,
+                params=params,
+                headers=headers,
+                proxy=self.platform_cfg.proxy or None,
+                timeout=aiohttp.ClientTimeout(total=15, connect=10),
+            ) as response:
                 if response.status != 200:
                     logger.warning(f"QQ Music API returned HTTP {response.status}")
                     return None
-                raw = await asyncio.to_thread(response.read)
-            finally:
-                response.close()
+                raw = await response.read()
             result = json.loads(raw.decode("utf-8", "ignore"))
             return result if isinstance(result, dict) else None
         except Exception as exc:
@@ -285,33 +251,22 @@ class QQMusic(BaseMusicPlayer):
         self, body: dict[str, Any], cookie: str
     ) -> dict[str, Any] | None:
         headers = dict(self.HEADERS)
-        headers.update(
-            {
-                "Content-Type": "application/json",
-                "Accept-Encoding": "gzip",
-            }
-        )
+        headers["Content-Type"] = "application/json"
         if cookie:
             headers["Cookie"] = cookie
 
-        request = urllib.request.Request(
-            self.API_URL,
-            data=json.dumps(body).encode("utf-8"),
-            headers=headers,
-            method="POST",
-        )
         try:
-            response = await asyncio.to_thread(self._opener.open, request, timeout=15)
-            try:
+            async with self._get_session().post(
+                self.API_URL,
+                data=json.dumps(body).encode("utf-8"),
+                headers=headers,
+                proxy=self.platform_cfg.proxy or None,
+                timeout=aiohttp.ClientTimeout(total=15, connect=10),
+            ) as response:
                 if response.status != 200:
                     logger.warning(f"QQ Music API returned HTTP {response.status}")
                     return None
-                raw = await asyncio.to_thread(response.read)
-            finally:
-                response.close()
-
-            if response.headers.get("Content-Encoding") == "gzip":
-                raw = gzip.decompress(raw)
+                raw = await response.read()
             result = json.loads(raw.decode("utf-8", "ignore"))
             return result if isinstance(result, dict) else None
         except Exception as exc:
@@ -568,16 +523,17 @@ class QQMusic(BaseMusicPlayer):
         """
         headers = dict(self.HEADERS)
         headers["Range"] = "bytes=0-31"
-        request = urllib.request.Request(url, headers=headers)
         try:
-            response = await asyncio.to_thread(self._opener.open, request, timeout=8)
-            try:
+            async with self._get_session().get(
+                url,
+                headers=headers,
+                proxy=self.platform_cfg.proxy or None,
+                timeout=aiohttp.ClientTimeout(total=8, connect=5),
+            ) as response:
                 if response.status not in {200, 206}:
                     return False
                 content_type = str(response.headers.get("Content-Type") or "").lower()
-                head = await asyncio.to_thread(response.read, 32)
-            finally:
-                response.close()
+                head = await response.content.read(32)
         except Exception as exc:
             logger.debug(f"QQ Music audio URL probe failed: {exc}")
             return False
@@ -811,10 +767,11 @@ class QQMusic(BaseMusicPlayer):
         Returns:
             The song with popular comments when QQ Music provides them.
         """
-        if song.comments:
+        if song.comments or not song.id:
             return song
 
-        params = urllib.parse.urlencode(
+        result = await self._get_json(
+            self.COMMENTS_API_URL,
             {
                 "g_tk": 0,
                 "loginUin": 0,
@@ -833,43 +790,20 @@ class QQMusic(BaseMusicPlayer):
                 "needmusiccrit": 0,
                 "pagenum": 0,
                 "pagesize": 15,
-            }
+            },
         )
-        request = urllib.request.Request(
-            f"{self.COMMENTS_API_URL}?{params}", headers=self.HEADERS
+        hot_comments = result.get("hot_comment") if isinstance(result, dict) else None
+        comment_list = (
+            hot_comments.get("commentlist") if isinstance(hot_comments, dict) else None
         )
-        try:
-            response = await asyncio.to_thread(self._opener.open, request, timeout=15)
-            try:
-                if response.status != 200:
-                    logger.warning(
-                        f"QQ Music comments API returned HTTP {response.status}"
-                    )
-                    return song
-                raw = await asyncio.to_thread(response.read)
-            finally:
-                response.close()
-
-            result = json.loads(raw.decode("utf-8", "ignore"))
-            hot_comments = (
-                result.get("hot_comment") if isinstance(result, dict) else None
-            )
-            comment_list = (
-                hot_comments.get("commentlist")
-                if isinstance(hot_comments, dict)
-                else None
-            )
-            if isinstance(comment_list, list):
-                song.comments = [
-                    {
-                        "content": item.get("rootcommentcontent", ""),
-                        "nickname": item.get("nick", ""),
-                        "likedCount": item.get("praisenum", 0),
-                    }
-                    for item in comment_list
-                    if isinstance(item, dict) and item.get("rootcommentcontent")
-                ]
-        except Exception as exc:
-            logger.warning(f"QQ Music comments request failed: {exc}")
-
+        if isinstance(comment_list, list):
+            song.comments = [
+                {
+                    "content": item.get("rootcommentcontent", ""),
+                    "nickname": item.get("nick", ""),
+                    "likedCount": item.get("praisenum", 0),
+                }
+                for item in comment_list
+                if isinstance(item, dict) and item.get("rootcommentcontent")
+            ]
         return song

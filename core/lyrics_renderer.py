@@ -5,6 +5,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .config import PluginConfig
 
+_TIMESTAMP_RE = re.compile(r"\[\d{2}:\d{2}(?:\.\d{2,3})?\]")
+
 
 class LyricsTheme:
     image_width: int = 1000
@@ -28,7 +30,24 @@ class LyricsRenderer:
     ):
         self.theme = theme or LyricsTheme()
         self.font_path = config.font_path
-        self.font = self.theme.load_font(str(self.font_path))
+
+    @staticmethod
+    def _build_gradient_background(
+        width: int,
+        height: int,
+        top_color: tuple[int, int, int],
+        bottom_color: tuple[int, int, int],
+    ) -> Image.Image:
+        """Create a vertical linear gradient image without per-pixel Python loops."""
+        pixels = bytearray(height * 3)
+        for y in range(height):
+            ratio = y / height
+            idx = y * 3
+            pixels[idx] = int(top_color[0] * (1 - ratio) + bottom_color[0] * ratio)
+            pixels[idx + 1] = int(top_color[1] * (1 - ratio) + bottom_color[1] * ratio)
+            pixels[idx + 2] = int(top_color[2] * (1 - ratio) + bottom_color[2] * ratio)
+        strip = Image.frombytes("RGB", (1, height), bytes(pixels))
+        return strip.resize((width, height), Image.Resampling.NEAREST)
 
     def draw_lyrics(
         self,
@@ -46,56 +65,53 @@ class LyricsRenderer:
         bottom_color = bottom_color or theme.bottom_color
         text_color = text_color or theme.text_color
 
+        # Load the font only for the duration of a single render so it does not stay resident.
+        font = theme.load_font(str(self.font_path))
+
         lines = lyrics.splitlines()
-        cleaned_lines = []
-        for line in lines:
-            cleaned = re.sub(r"\[\d{2}:\d{2}(?:\.\d{2,3})?\]", "", line)
-            cleaned_lines.append(cleaned if cleaned != "" else "")
+        cleaned_lines = [_TIMESTAMP_RE.sub("", line) or "" for line in lines]
 
         dummy_img = Image.new("RGB", (image_width, 1))
         draw = ImageDraw.Draw(dummy_img)
-        line_heights = []
+        line_layouts: list[tuple[str, int, int]] = []
         max_line_width = 0
+        total_line_height = 0
         for line in cleaned_lines:
             text = line if line.strip() else "　"
-            bbox = draw.textbbox((0, 0), text, font=self.font)
-            line_heights.append(bbox[3])
-            max_line_width = max(max_line_width, bbox[2] - bbox[0])
+            bbox = draw.textbbox((0, 0), text, font=font)
+            line_width = bbox[2] - bbox[0]
+            line_height = bbox[3]
+            line_layouts.append((text, line_width, line_height))
+            max_line_width = max(max_line_width, line_width)
+            total_line_height += line_height
 
         image_width = int(
             max(image_width, max_line_width + theme.horizontal_padding * 2)
         )
-        total_height = int(
-            sum(line_heights)
-            + line_spacing * (len(cleaned_lines) - 1)
-            + theme.vertical_padding * 2
+        total_height = max(
+            1,
+            int(
+                total_line_height
+                + line_spacing * max(len(line_layouts) - 1, 0)
+                + theme.vertical_padding * 2
+            ),
         )
 
-        img = Image.new("RGB", (image_width, total_height))
-        for y in range(total_height):
-            ratio = y / total_height
-            r = int(top_color[0] * (1 - ratio) + bottom_color[0] * ratio)
-            g = int(top_color[1] * (1 - ratio) + bottom_color[1] * ratio)
-            b = int(top_color[2] * (1 - ratio) + bottom_color[2] * ratio)
-            for x in range(image_width):
-                img.putpixel((x, y), (r, g, b))
-
+        img = self._build_gradient_background(
+            image_width, total_height, top_color, bottom_color
+        )
         draw = ImageDraw.Draw(img)
 
         y = theme.vertical_padding
-        for line, line_height in zip(cleaned_lines, line_heights):
-            text = line if line.strip() else "　"
-            bbox = draw.textbbox((0, 0), text, font=self.font)
-            text_width = bbox[2] - bbox[0]
+        for text, text_width, line_height in line_layouts:
             draw.text(
                 ((image_width - text_width) / 2, y),
                 text,
-                font=self.font,
+                font=font,
                 fill=text_color,
             )
             y += line_height + line_spacing
 
         img_bytes = io.BytesIO()
         img.save(img_bytes, format="JPEG")
-        img_bytes.seek(0)
         return img_bytes.getvalue()

@@ -1,10 +1,8 @@
-import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from typing import ClassVar
 from urllib.parse import parse_qs, urljoin, urlparse
 
-import aiofiles
 import aiohttp
 
 from astrbot.api import logger
@@ -306,27 +304,19 @@ class NekoMusic(BaseMusicPlayer):
             logger.warning(f"Neko Music did not return an audio URL for song {song.id}")
         return song
 
-    async def download_cover(self, url: str) -> bytes | None:
+    async def download_cover(
+        self, url: str, *, headers: dict[str, str] | None = None
+    ) -> bytes | None:
         """Download a Neko cover using the platform proxy and client headers.
 
         Args:
             url: Cover image URL.
+            headers: Optional header override.
 
         Returns:
             Image bytes, or None if the request fails.
         """
-        try:
-            async with self._get_session().get(
-                url,
-                headers=self.HEADERS,
-                proxy=self.platform_cfg.proxy or None,
-            ) as response:
-                if response.status != 200:
-                    return None
-                return await response.read()
-        except (TimeoutError, aiohttp.ClientError, OSError) as exc:
-            logger.warning(f"Neko Music cover download failed: {exc}")
-            return None
+        return await super().download_cover(url, headers=headers or self.HEADERS)
 
     async def download_audio(
         self, song: Song, quality: str | None = None
@@ -370,31 +360,13 @@ class NekoMusic(BaseMusicPlayer):
             )
         if not song.audio_url:
             return None
-        suffix = Path(urlparse(song.audio_url).path).suffix.lower()
-        if suffix not in {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav"}:
-            suffix = ".mp3"
-        self.cfg.temp_dir.mkdir(parents=True, exist_ok=True)
-        file_path = self.cfg.temp_dir / f"{uuid.uuid4().hex}{suffix}"
-        try:
-            async with self._get_session().get(
-                song.audio_url,
-                headers=self.HEADERS,
-                proxy=self.platform_cfg.proxy or None,
-                timeout=120,  # type: ignore
-            ) as response:
-                if response.status != 200:
-                    logger.warning(
-                        f"Neko Music audio download returned HTTP {response.status}"
-                    )
-                    return None
-                async with aiofiles.open(file_path, "wb") as file:
-                    async for chunk in response.content.iter_chunked(64 * 1024):
-                        await file.write(chunk)
-            return file_path
-        except (TimeoutError, aiohttp.ClientError, OSError) as exc:
-            file_path.unlink(missing_ok=True)
-            logger.error(f"Neko Music audio download failed: {exc}")
-            return None
+        return await self._download_to_temp(
+            song.audio_url,
+            headers=self.HEADERS,
+            allowed_suffixes=frozenset(
+                {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav"}
+            ),
+        )
 
     async def fetch_comments(self, song: Song) -> Song:
         """Load the first page of public NekoMusic comments.
