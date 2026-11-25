@@ -196,6 +196,7 @@ class SendConfig(ConfigNode):
 
 
 class PluginConfig(ConfigNode):
+    listening_room_url: str
     search_config: SearchConfig
     send_config: SendConfig
     players_template: list[dict[str, Any]]

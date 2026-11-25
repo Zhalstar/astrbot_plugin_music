@@ -1,4 +1,10 @@
 {
+    "listening_room_url": {
+        "description": "听歌房链接",
+        "type": "string",
+        "invisible": true,
+        "default": "https://zhalslar.top/listen"
+    },
     "search_config": {
         "description": "搜歌配置",
         "hint": "配置音源优先级、搜索结果数量以及候选歌曲的展示和等待方式。",

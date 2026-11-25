@@ -116,6 +116,11 @@ class MusicPlugin(Star):
         finally:
             event.stop_event()
 
+    @filter.command("一起听")
+    async def share_listening_link(self, event: AstrMessageEvent):
+        """发送听歌房链接。"""
+        yield event.plain_result(self.cfg.listening_room_url)
+
     @filter.command("点歌")
     async def search_song(self, event: AstrMessageEvent):
         """点歌 <歌手歌名>, 也可用命令：网易点歌 NJ点歌 QQ点歌..."""
